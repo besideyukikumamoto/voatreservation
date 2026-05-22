@@ -2,7 +2,7 @@ require('dotenv').config();
 const { chromium } = require('playwright');
 
 const VOAT_SYNC_MARKER = '[VOAT-SYNC]';
-const MONTHS_TO_PROCESS = 2; // 処理する月数（当月 + 翌月）
+const MONTHS_TO_PROCESS = 3; // 処理する月数（当月 + 翌月）
 
 // 現在選択されている日付のレッスン情報を抽出
 async function extractCurrentDateReservations(page) {
