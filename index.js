@@ -195,10 +195,14 @@ async function processMonth(page) {
           end: { dateTime: endDateTime, timeZone: 'Asia/Tokyo' },
         };
 
-        // 同じ開始時刻のイベントをすべて検索（マーカーの有無を問わない）
+        // 同じ開始日時で、かつタイトル（レッスン名）が一致するイベントを検索（タイムゾーン表記の揺れを吸収するためDateオブジェクトで比較）
+        const targetStartTime = new Date(`${res.fullDate}T${res.startTime}:00+09:00`).getTime();
         const matchingEvents = existingEvents.filter(e => {
           const eStart = e.start?.dateTime;
-          return eStart && eStart.startsWith(`${res.fullDate}T${res.startTime}`);
+          if (!eStart) return false;
+          const isSameTime = new Date(eStart).getTime() === targetStartTime;
+          const isSameTitle = e.summary === res.title;
+          return isSameTime && isSameTitle;
         });
 
         try {
@@ -235,7 +239,11 @@ async function processMonth(page) {
       }
 
       // --- 4. VOATに存在しない予定をすべて削除 ---
-      const staleEvents = existingEvents.filter(e => !handledEventIds.has(e.id));
+      // 安全のため、説明文に [VOAT-SYNC] マーカーが含まれているイベントのみを削除対象にする
+      const staleEvents = existingEvents.filter(e => {
+        const hasMarker = e.description && e.description.includes(VOAT_SYNC_MARKER);
+        return hasMarker && !handledEventIds.has(e.id);
+      });
       if (staleEvents.length > 0) {
         console.log(`\n${staleEvents.length} 件のVOATに存在しない予定を削除します...`);
         for (const ev of staleEvents) {
