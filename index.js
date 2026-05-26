@@ -108,7 +108,14 @@ async function processMonth(page) {
     console.log('ログインを実行しています...');
     await page.click('input[value="ログイン"]');
     console.log('ログイン完了を待機しています...');
-    await page.waitForURL('**/instmypage/', { timeout: 15000 }).catch(() => {});
+    try {
+      await page.waitForURL('**/instmypage/', { timeout: 15000 });
+      console.log('ログインに成功しました。');
+    } catch (urlErr) {
+      console.error('エラー: ログイン後にマイページに遷移できませんでした。VOAT_LOGIN_ID や VOAT_PASSWORD が間違っている可能性があります。');
+      await page.screenshot({ path: 'login_error.png' }).catch(() => {});
+      process.exit(1);
+    }
     await page.waitForTimeout(2000);
 
     // ===== レッスン情報ページへ移動 =====
@@ -263,6 +270,7 @@ async function processMonth(page) {
 
   } catch (error) {
     console.error('スクレイピング中にエラーが発生しました:', error);
+    process.exit(1);
   } finally {
     console.log('ブラウザを終了しています...');
     await browser.close();
