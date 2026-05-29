@@ -186,9 +186,22 @@ async function processMonth(page) {
       } while (pageToken);
       console.log(`  既存イベント合計: ${existingEvents.length} 件`);
 
-      // --- 3. 各レッスンの時間帯にある既存イベントを全削除 → 新規作成 ---
-      const handledEventIds = new Set();
+      // --- 3. 期間内の既存イベントをすべて削除（古いデータをクリーンアップ）---
+      console.log(`\n既存イベント ${existingEvents.length} 件をすべて削除中...`);
+      for (const ev of existingEvents) {
+        try {
+          console.log(`  [削除] ${ev.start?.dateTime || ev.start?.date} : ${ev.summary}`);
+          await calendar.events.delete({ calendarId, eventId: ev.id });
+        } catch (delErr) {
+          // 既に削除済みの場合などはスキップ
+          if (delErr.code !== 410) {
+            console.error(`  [削除エラー] ${ev.summary}: ${delErr.message}`);
+          }
+        }
+      }
 
+      // --- 4. 最新のVOAT情報で全件新規登録 ---
+      console.log(`\n最新の予定 ${allReservations.length} 件を登録中...`);
       for (const res of allReservations) {
         const startDateTime = `${res.fullDate}T${res.startTime}:00+09:00`;
         const endDateTime = `${res.fullDate}T${res.endTime}:00+09:00`;
@@ -202,67 +215,12 @@ async function processMonth(page) {
           end: { dateTime: endDateTime, timeZone: 'Asia/Tokyo' },
         };
 
-        // 同じ開始日時で、かつタイトル（レッスン名）が一致するイベントを検索（タイムゾーン表記の揺れを吸収するためDateオブジェクトで比較）
-        const targetStartTime = new Date(`${res.fullDate}T${res.startTime}:00+09:00`).getTime();
-        const matchingEvents = existingEvents.filter(e => {
-          const eStart = e.start?.dateTime;
-          if (!eStart) return false;
-          const isSameTime = new Date(eStart).getTime() === targetStartTime;
-          const isSameTitle = e.summary === res.title;
-          return isSameTime && isSameTitle;
-        });
-
         try {
-          if (matchingEvents.length > 0) {
-            // 最初の1件を更新、残りは重複なので削除
-            const keepEvent = matchingEvents[0];
-            handledEventIds.add(keepEvent.id);
-            console.log(`  [更新] ${startDateTime} : ${res.title}`);
-            await calendar.events.update({
-              calendarId, eventId: keepEvent.id, requestBody: eventBody,
-            });
-
-            // 重複イベントを削除
-            for (let i = 1; i < matchingEvents.length; i++) {
-              handledEventIds.add(matchingEvents[i].id);
-              console.log(`  [重複削除] ${startDateTime} : ${matchingEvents[i].summary}`);
-              try {
-                await calendar.events.delete({ calendarId, eventId: matchingEvents[i].id });
-              } catch (delErr) {
-                console.error(`  [削除エラー] ${matchingEvents[i].summary}: ${delErr.message}`);
-              }
-            }
-          } else {
-            // 新規作成
-            console.log(`  [登録] ${startDateTime} : ${res.title}`);
-            const inserted = await calendar.events.insert({
-              calendarId, requestBody: eventBody,
-            });
-            handledEventIds.add(inserted.data.id);
-          }
+          console.log(`  [登録] ${startDateTime} : ${res.title}`);
+          await calendar.events.insert({ calendarId, requestBody: eventBody });
         } catch (apiErr) {
           console.error(`  [エラー] ${startDateTime}: ${apiErr.message}`);
         }
-      }
-
-      // --- 4. VOATに存在しない予定をすべて削除 ---
-      // 安全のため、説明文に [VOAT-SYNC] マーカーが含まれているイベントのみを削除対象にする
-      const staleEvents = existingEvents.filter(e => {
-        const hasMarker = e.description && e.description.includes(VOAT_SYNC_MARKER);
-        return hasMarker && !handledEventIds.has(e.id);
-      });
-      if (staleEvents.length > 0) {
-        console.log(`\n${staleEvents.length} 件のVOATに存在しない予定を削除します...`);
-        for (const ev of staleEvents) {
-          try {
-            console.log(`  [削除] ${ev.start?.dateTime || ev.start?.date} : ${ev.summary}`);
-            await calendar.events.delete({ calendarId, eventId: ev.id });
-          } catch (delErr) {
-            console.error(`  [削除エラー] ${ev.summary}: ${delErr.message}`);
-          }
-        }
-      } else {
-        console.log('削除対象の予定はありませんでした。');
       }
 
       console.log('\nGoogle Calendarへの連携が完了しました。');
