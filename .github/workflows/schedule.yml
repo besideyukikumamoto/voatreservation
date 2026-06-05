@@ -6,9 +6,6 @@ on:
     - cron: '27 * * * *'
   workflow_dispatch: # 手動実行ボタンも追加
 
-permissions:
-  contents: write # Keepalive用の書き込み権限
-
 jobs:
   scrape-and-sync:
     runs-on: ubuntu-latest
@@ -38,7 +35,3 @@ jobs:
           VOAT_PASSWORD: ${{ secrets.VOAT_PASSWORD }}
           GOOGLE_CALENDAR_ID: ${{ secrets.GOOGLE_CALENDAR_ID }}
           GOOGLE_APPLICATION_CREDENTIALS: ./service-account.json
-
-      # 60日間リポジトリにコミットがないとGitHub Actionsが自動停止する仕様を防ぐ
-      - name: Keepalive Workflow
-        uses: gautamkrishnar/keepalive-workflow@v2
