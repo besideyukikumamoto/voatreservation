@@ -6,6 +6,11 @@ on:
     - cron: '27 * * * *'
   workflow_dispatch: # 手動実行ボタンも追加
 
+# 同時に複数の実行が走るのを防ぐ設定（予定の重複登録を防止）
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   scrape-and-sync:
     runs-on: ubuntu-latest
