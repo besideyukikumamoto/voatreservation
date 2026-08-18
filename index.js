@@ -272,8 +272,19 @@ async function processMonth(page) {
 
       // --- 4. 最新のVOAT情報で全件新規登録 ---
       if (allReservations.length > 0) {
-        console.log(`\n最新の予定 ${allReservations.length} 件を登録中...`);
+        // メモリ上での二重登録防止（安全ガード）
+        const uniqueReservations = [];
+        const seenKey = new Set();
         for (const res of allReservations) {
+          const key = `${res.fullDate}_${res.startTime}_${res.endTime}_${res.studio}_${res.title}`;
+          if (!seenKey.has(key)) {
+            seenKey.add(key);
+            uniqueReservations.push(res);
+          }
+        }
+
+        console.log(`\n最新の予定 ${uniqueReservations.length} 件を登録中...`);
+        for (const res of uniqueReservations) {
           const startDateTime = `${res.fullDate}T${res.startTime}:00+09:00`;
           const endDateTime = `${res.fullDate}T${res.endTime}:00+09:00`;
           const description = `${VOAT_SYNC_MARKER}\n種別: ${res.type}\n内容: ${res.content}\n生徒: ${res.students.join(', ')}`;
