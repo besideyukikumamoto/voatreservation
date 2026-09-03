@@ -131,11 +131,15 @@ async function getReservableDates(page) {
   });
 }
 
-// 日付のクリックとAjax/DOM描画完了の高速待機
+// 日付のクリックとAjax/DOM描画完了の確実な待機（API Gateway レスポンス待機により1日ズレを完全防止）
 async function selectDateAndWait(page, selector, dayNumber) {
   for (let attempt = 1; attempt <= 3; attempt++) {
     try {
-      await page.click(selector);
+      // 日付クリックと同時に発生する API Gateway の通信完了を確実に待機
+      await Promise.all([
+        page.waitForResponse(res => res.url().includes('execute-api') && res.request().method() === 'POST', { timeout: 8000 }).catch(() => null),
+        page.click(selector),
+      ]);
 
       // .pickup-date の日付（日番号）がクリック対象と一致するまで待機
       await page.waitForFunction((expectedDay) => {
@@ -146,8 +150,8 @@ async function selectDateAndWait(page, selector, dayNumber) {
         return parseInt(parts[1], 10) === expectedDay;
       }, dayNumber, { timeout: 6000 });
 
-      // 最適化された最小待機 (400ms -> 150ms)
-      await page.waitForTimeout(150);
+      // レンダリング反映待機 (200ms)
+      await page.waitForTimeout(200);
       return true;
     } catch (e) {
       console.warn(`    ⚠️ 日付選択待機リトライ (${attempt}/3): day=${dayNumber}`);
