@@ -49,4 +49,6 @@ jobs:
           VOAT_ACCOUNTS_JSON: ${{ secrets.VOAT_ACCOUNTS_JSON }}
           GOOGLE_APPLICATION_CREDENTIALS: ./service-account.json
           SPREADSHEET_ID: ${{ secrets.SPREADSHEET_ID || '1vwLDxLeLrUb6icuYU9M0w4feTPpNf_mPxRItHSS30s4' }}
+          LINE_CHANNEL_ACCESS_TOKEN: ${{ secrets.LINE_CHANNEL_ACCESS_TOKEN || 'Nmla7Cogq/6jILUzytIw8KmrB54KaXUzOvmroMZcg0ns4K/jToWVJjmVNe+Nu2weHCrgsXvbvQiboHCP7FLGEgAyjLnvWTDRCjAAtaQoH5ynVxuJ6vnfskVKsuPf2laSW71yIEuuY9hHzNAJLZEKvQdB04t89/1O/w1cDnyilFU=' }}
+          LINE_ADMIN_USER_ID: ${{ secrets.LINE_ADMIN_USER_ID || 'U1c94008254a2d065c85b9eed253ccf12' }}
 
