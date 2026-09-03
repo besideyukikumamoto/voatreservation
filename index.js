@@ -1,24 +1,68 @@
 require('dotenv').config();
 const { chromium } = require('playwright');
+const { google } = require('googleapis');
 
 const VOAT_SYNC_MARKER = '[VOAT-SYNC]';
 const MONTHS_TO_PROCESS = 3; // 処理する月数（当月含む3ヶ月分）
+const SPREADSHEET_ID = process.env.SPREADSHEET_ID || '1vwLDxLeLrUb6icuYU9M0w4feTPpNf_mPxRItHSS30s4';
 
-// 現在選択されている日付のレッスン情報を抽出
+// 時間スロットの定義 (11:00 〜 21:30, 22スロット)
+const START_H = 11;
+const END_H = 21;
+const TIME_SLOTS = [];
+for (let h = START_H; h <= END_H; h++) {
+  TIME_SLOTS.push(`${String(h).padStart(2, '0')}:00`);
+  TIME_SLOTS.push(`${String(h).padStart(2, '0')}:30`);
+}
+
+// 色の定義 (RGB 0.0〜1.0)
+const COLOR_WHITE = { red: 1.0, green: 1.0, blue: 1.0 };
+const COLOR_SAT = { red: 0.93333334, green: 0.95686275, blue: 1.0 };      // #eef4ff
+const COLOR_SUN = { red: 1.0, green: 0.9490196, blue: 0.9490196 };        // #fff2f2
+const COLOR_GROUP = { red: 0.7882353, green: 0.85490197, blue: 0.972549 }; // #c9daf8
+const COLOR_OFF = { red: 0.8509804, green: 0.8509804, blue: 0.8509804 };    // #d9d9d9 (休み)
+
+const DAY_NAMES = ['日', '月', '火', '水', '木', '金', '土'];
+
+// 現在選択されている日付の稼働枠およびレッスン情報を抽出
 async function extractCurrentDateReservations(page, expectedAriaLabel) {
   return await page.evaluate(() => {
-    const extractedData = [];
+    const now = new Date();
+    const currentYear = now.getFullYear();
+    const currentMonth = now.getMonth() + 1; // 1-12
+
+    let year = currentYear;
     const yearInput = document.querySelector('input.cur-year');
-    const year = yearInput && yearInput.value ? yearInput.value.trim() : new Date().getFullYear().toString();
+    if (yearInput && yearInput.value) {
+      const parsed = parseInt(yearInput.value.trim(), 10);
+      if (!isNaN(parsed) && parsed >= 2020 && parsed <= 2099) {
+        year = parsed;
+      }
+    }
+
     const dateElement = document.querySelector('.pickup-date');
     const monthDay = dateElement ? dateElement.innerText.trim() : '';
-    if (!monthDay) return { success: false, fullDate: '', data: [] };
+    if (!monthDay) return { success: false, fullDate: '', openSlots: [], data: [] };
 
     // MM/DD または M/D を YYYY-MM-DD に正規化
     const parts = monthDay.split('/');
-    if (parts.length !== 2) return { success: false, fullDate: '', data: [] };
-    const m = parts[0].trim().padStart(2, '0');
-    const d = parts[1].trim().padStart(2, '0');
+    if (parts.length !== 2) return { success: false, fullDate: '', openSlots: [], data: [] };
+    const mNum = parseInt(parts[0].trim(), 10);
+    const dNum = parseInt(parts[1].trim(), 10);
+    if (isNaN(mNum) || isNaN(dNum)) return { success: false, fullDate: '', openSlots: [], data: [] };
+
+    // 【年またぎガード】年末（11月・12月）に翌年（1月〜3月）のデータを処理している場合、
+    // input.cur-year が前年のままでも確実に翌年（currentYear + 1）として扱う
+    if (currentMonth >= 11 && mNum <= 3 && year <= currentYear) {
+      year = currentYear + 1;
+    }
+    // 逆に年始（1月・2月）に前年（11月・12月）のデータを処理している場合
+    if (currentMonth <= 2 && mNum >= 11 && year >= currentYear) {
+      year = currentYear - 1;
+    }
+
+    const m = String(mNum).padStart(2, '0');
+    const d = String(dNum).padStart(2, '0');
     const fullDate = `${year}-${m}-${d}`;
 
     const rows = document.querySelectorAll('table.sec tbody tr');
@@ -38,6 +82,22 @@ async function extractCurrentDateReservations(page, expectedAriaLabel) {
       }
       if (!startTime || !endTime) return;
 
+      // 【時間2桁ゼロ埋め】9:00 -> 09:00 に確実に正規化 (Calendar API 400エラー防止)
+      startTime = startTime.split(':').map(p => p.trim().padStart(2, '0')).join(':');
+      endTime = endTime.split(':').map(p => p.trim().padStart(2, '0')).join(':');
+
+      // 30分刻みの稼働スロットを展開して openSlots に登録
+      const [sh, sm] = startTime.split(':').map(Number);
+      const [eh, em] = endTime.split(':').map(Number);
+      let cur = sh * 60 + sm;
+      const endMin = eh * 60 + em;
+      while (cur < endMin) {
+        const slotH = String(Math.floor(cur / 60)).padStart(2, '0');
+        const slotM = String(cur % 60).padStart(2, '0');
+        openSlots.push(`${slotH}:${slotM}`);
+        cur += 30;
+      }
+
       const studio = row.querySelector('.td-studio')?.innerText.trim().replace(/\n/g, ' ') || '';
       const lessonCell = row.querySelector('.td-lesson');
       if (!lessonCell) return;
@@ -47,9 +107,9 @@ async function extractCurrentDateReservations(page, expectedAriaLabel) {
       
       // レッスン欄の全テキストを取得（PERSONAL/GROUP/EVENT も含む）
       let rawText = lessonCell.innerText.trim();
-      if (!rawText || rawText === '受付中' || rawText === '予約可' || rawText === '空き') return; // 空枠はスキップ
+      if (!rawText || rawText === '受付中' || rawText === '予約可' || rawText === '空き') return; // 空き枠は予約データとしてはスキップ
 
-      // 不要なボタンUIテキスト（欠席フォロー動画を送信する等）を除去
+      // 不要なボタンUIテキストを除去
       rawText = rawText
         .replace(/欠席フォロー動画を送信する\s*>>/g, '')
         .replace(/動画を送信する\s*>>/g, '')
@@ -69,7 +129,7 @@ async function extractCurrentDateReservations(page, expectedAriaLabel) {
 
       extractedData.push({ fullDate, startTime, endTime, studio, type, content, students, title });
     });
-    return { success: true, fullDate, data: extractedData };
+    return { success: true, fullDate, openSlots: Array.from(new Set(openSlots)), data: extractedData };
   });
 }
 
@@ -115,11 +175,11 @@ async function selectDateAndWait(page, selector, dayNumber) {
   return false;
 }
 
-// 1ヶ月分の全日付を巡回してレッスン情報を取得
+// 1ヶ月分の全日付を巡回してレッスン情報・稼働枠を取得
 async function processMonth(page) {
-  const results = [];
+  const monthData = [];
   const dates = await getReservableDates(page);
-  if (dates.length === 0) return results;
+  if (dates.length === 0) return monthData;
 
   console.log(`  当月全 ${dates.length} 日を完全走査中...`);
   for (const item of dates) {
@@ -139,13 +199,302 @@ async function processMonth(page) {
         continue;
       }
 
-      results.push(...extractResult.data);
+      monthData.push({
+        fullDate: extractResult.fullDate,
+        openSlots: extractResult.openSlots,
+        reservations: extractResult.data,
+      });
+
       if (extractResult.data.length > 0) {
-        console.log(`    ✅ ${extractResult.fullDate} (${item.ariaLabel}): ${extractResult.data.length} 件のレッスン抽出`);
+        console.log(`    ✅ ${extractResult.fullDate} (${item.ariaLabel}): ${extractResult.data.length} 件のレッスン抽出 (稼働: ${extractResult.openSlots.length} 枠)`);
+      } else {
+        console.log(`    ℹ️ ${extractResult.fullDate} (${item.ariaLabel}): 予約0件 (稼働: ${extractResult.openSlots.length} 枠)`);
       }
     }
   }
-  return results;
+  return monthData;
+}
+
+// スプレッドシートの指定シートにマトリックスデータを同期
+async function syncMonthToSpreadsheet(sheets, spreadsheetId, targetSheetTitle, year, month, daysDataMap, metaSheets) {
+  let targetSheet = metaSheets.find(s => s.properties.title === targetSheetTitle);
+  let sheetId;
+
+  const daysInMonth = new Date(year, month, 0).getDate();
+  const reqCols = daysInMonth + 1; // A列(時間) + 1〜daysInMonth
+  const reqRows = TIME_SLOTS.length + 2; // 1行目:曜日, 2行目:日付, 3〜24行目:データ (計24行)
+
+  if (!targetSheet) {
+    console.log(`  ➕ シート「${targetSheetTitle}」を新規作成します...`);
+    const addRes = await sheets.spreadsheets.batchUpdate({
+      spreadsheetId,
+      requestBody: {
+        requests: [
+          {
+            addSheet: {
+              properties: {
+                title: targetSheetTitle,
+                gridProperties: {
+                  rowCount: reqRows,
+                  columnCount: reqCols,
+                  frozenRowCount: 2,
+                  frozenColumnCount: 1,
+                },
+              },
+            },
+          },
+        ],
+      },
+    });
+    sheetId = addRes.data.replies[0].addSheet.properties.sheetId;
+  } else {
+    sheetId = targetSheet.properties.sheetId;
+  }
+
+  console.log(`  📊 シート「${targetSheetTitle}」(ID: ${sheetId}) のマトリックス同期中...`);
+
+  // ヘッダー行と時間列の準備
+  const headerRow1 = [{ userEnteredValue: { stringValue: '開始時間' }, userEnteredFormat: { horizontalAlignment: 'CENTER', verticalAlignment: 'MIDDLE', textFormat: { bold: true, fontSize: 8 }, backgroundColor: { red: 0.95, green: 0.95, blue: 0.95 } } }];
+  const headerRow2 = [{ userEnteredValue: { stringValue: '' }, userEnteredFormat: { horizontalAlignment: 'CENTER', verticalAlignment: 'MIDDLE', textFormat: { bold: true, fontSize: 8 }, backgroundColor: { red: 0.95, green: 0.95, blue: 0.95 } } }];
+
+  for (let d = 1; d <= daysInMonth; d++) {
+    const dayOfWeek = new Date(year, month - 1, d).getDay();
+    const dayName = DAY_NAMES[dayOfWeek];
+    const isSat = dayOfWeek === 6;
+    const isSun = dayOfWeek === 0;
+    const bg = isSat ? COLOR_SAT : isSun ? COLOR_SUN : COLOR_WHITE;
+
+    headerRow1.push({
+      userEnteredValue: { stringValue: dayName },
+      userEnteredFormat: {
+        horizontalAlignment: 'CENTER',
+        verticalAlignment: 'MIDDLE',
+        textFormat: { bold: true, fontSize: 10 },
+        backgroundColor: bg,
+      },
+    });
+
+    headerRow2.push({
+      userEnteredValue: { numberValue: d },
+      userEnteredFormat: {
+        horizontalAlignment: 'CENTER',
+        verticalAlignment: 'MIDDLE',
+        textFormat: { bold: true, fontSize: 11 },
+        backgroundColor: bg,
+      },
+    });
+  }
+
+  // 22行のデータ行を構築
+  const dataRows = [];
+  const mergeRequests = [];
+
+  for (let rIdx = 0; rIdx < TIME_SLOTS.length; rIdx++) {
+    const timeStr = TIME_SLOTS[rIdx];
+    const rowCells = [
+      {
+        userEnteredValue: { stringValue: timeStr },
+        userEnteredFormat: {
+          horizontalAlignment: 'CENTER',
+          verticalAlignment: 'MIDDLE',
+          textFormat: { bold: true, fontSize: 8 },
+          backgroundColor: { red: 0.95, green: 0.95, blue: 0.95 },
+        },
+      },
+    ];
+
+    for (let d = 1; d <= daysInMonth; d++) {
+      const colIdx = d; // 1-based column in sheet (1 = B列)
+      const dayOfWeek = new Date(year, month - 1, d).getDay();
+      const isSat = dayOfWeek === 6;
+      const isSun = dayOfWeek === 0;
+      const defaultBg = isSat ? COLOR_SAT : isSun ? COLOR_SUN : COLOR_WHITE;
+
+      const dateKey = `${year}-${String(month).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+      const dayData = daysDataMap[dateKey] || { openSlots: [], reservations: [] };
+
+      // 該当スロットのレッスン予約を探す
+      const resList = dayData.reservations.filter(res => {
+        const [sh, sm] = res.startTime.split(':').map(Number);
+        const [eh, em] = res.endTime.split(':').map(Number);
+        const [th, tm] = timeStr.split(':').map(Number);
+        const startM = sh * 60 + sm;
+        const endM = eh * 60 + em;
+        const curM = th * 60 + tm;
+        return curM >= startM && curM < endM;
+      });
+
+      const isOpen = dayData.openSlots.includes(timeStr);
+
+      let cellValue = '';
+      let cellBg = defaultBg;
+      let cellFontSize = 8;
+
+      if (resList.length > 0) {
+        const ev = resList[0];
+        const upper = (ev.title || '').toUpperCase().replace(/[Ａ-Ｚ]/g, s => String.fromCharCode(s.charCodeAt(0) - 0xFEE0));
+        const isGroup = upper.includes('GROUP');
+
+        if (isGroup) {
+          let cleanTitle = ev.title.replace(/\s*[\(（].*$/, '');
+          cellValue = cleanTitle.replace(/GROUP\s*/i, 'GROUP\n');
+          cellBg = COLOR_GROUP;
+          cellFontSize = 5;
+        } else {
+          cellValue = '予約済み';
+          cellBg = defaultBg;
+          cellFontSize = 8;
+        }
+
+        // 予約の開始行であれば連続セル結合を計画
+        const [sh, sm] = ev.startTime.split(':').map(Number);
+        const [eh, em] = ev.endTime.split(':').map(Number);
+        const [th, tm] = timeStr.split(':').map(Number);
+        const startM = sh * 60 + sm;
+        const endM = eh * 60 + em;
+        const curM = th * 60 + tm;
+
+        if (curM === startM) {
+          const numBlocks = Math.max(1, Math.round((endM - startM) / 30));
+          if (numBlocks > 1) {
+            mergeRequests.push({
+              mergeCells: {
+                range: {
+                  sheetId,
+                  startRowIndex: 2 + rIdx,
+                  endRowIndex: Math.min(2 + rIdx + numBlocks, reqRows),
+                  startColumnIndex: colIdx,
+                  endColumnIndex: colIdx + 1,
+                },
+                mergeType: 'MERGE_ALL',
+              },
+            });
+          }
+        }
+      } else if (isOpen) {
+        // 稼働中（予約なし・受付中） -> 白 / 土日色
+        cellValue = '';
+        cellBg = defaultBg;
+        cellFontSize = 8;
+      } else {
+        // 休みに設定（非稼働枠・休日） -> グレー
+        cellValue = '';
+        cellBg = COLOR_OFF;
+        cellFontSize = 8;
+      }
+
+      rowCells.push({
+        userEnteredValue: cellValue ? { stringValue: cellValue } : { stringValue: '' },
+        userEnteredFormat: {
+          horizontalAlignment: 'CENTER',
+          verticalAlignment: 'MIDDLE',
+          textFormat: { bold: true, fontSize: cellFontSize },
+          backgroundColor: cellBg,
+          wrapStrategy: 'WRAP',
+        },
+      });
+    }
+
+    dataRows.push({ values: rowCells });
+  }
+
+  // batchUpdate リクエストの組み立て
+  const updateRequests = [
+    // 1. データ領域の結合を一旦全解除
+    {
+      unmergeCells: {
+        range: {
+          sheetId,
+          startRowIndex: 2,
+          endRowIndex: reqRows,
+          startColumnIndex: 1,
+          endColumnIndex: reqCols,
+        },
+      },
+    },
+    // 2. ヘッダーと時間軸、全データセルを一括更新
+    {
+      updateCells: {
+        range: {
+          sheetId,
+          startRowIndex: 0,
+          endRowIndex: reqRows,
+          startColumnIndex: 0,
+          endColumnIndex: reqCols,
+        },
+        rows: [
+          { values: headerRow1 },
+          { values: headerRow2 },
+          ...dataRows,
+        ],
+        fields: 'userEnteredValue,userEnteredFormat(horizontalAlignment,verticalAlignment,textFormat,backgroundColor,wrapStrategy)',
+      },
+    },
+    // 3. 予約ブロックの結合
+    ...mergeRequests,
+    // 4. 外枠・境界線の設定
+    {
+      updateBorders: {
+        range: {
+          sheetId,
+          startRowIndex: 0,
+          endRowIndex: reqRows,
+          startColumnIndex: 0,
+          endColumnIndex: reqCols,
+        },
+        top: { style: 'SOLID', color: { red: 0, green: 0, blue: 0 } },
+        bottom: { style: 'SOLID', color: { red: 0, green: 0, blue: 0 } },
+        left: { style: 'SOLID', color: { red: 0, green: 0, blue: 0 } },
+        right: { style: 'SOLID', color: { red: 0, green: 0, blue: 0 } },
+        innerHorizontal: { style: 'SOLID', color: { red: 0, green: 0, blue: 0 } },
+        innerVertical: { style: 'SOLID', color: { red: 0, green: 0, blue: 0 } },
+      },
+    },
+    // 5. 列幅・行高さの設定
+    {
+      updateDimensionProperties: {
+        range: {
+          sheetId,
+          dimension: 'COLUMNS',
+          startIndex: 0,
+          endIndex: 1,
+        },
+        properties: { pixelSize: 40 },
+        fields: 'pixelSize',
+      },
+    },
+    {
+      updateDimensionProperties: {
+        range: {
+          sheetId,
+          dimension: 'COLUMNS',
+          startIndex: 1,
+          endIndex: reqCols,
+        },
+        properties: { pixelSize: 35 },
+        fields: 'pixelSize',
+      },
+    },
+    {
+      updateDimensionProperties: {
+        range: {
+          sheetId,
+          dimension: 'ROWS',
+          startIndex: 0,
+          endIndex: reqRows,
+        },
+        properties: { pixelSize: 30 },
+        fields: 'pixelSize',
+      },
+    },
+  ];
+
+  await sheets.spreadsheets.batchUpdate({
+    spreadsheetId,
+    requestBody: { requests: updateRequests },
+  });
+
+  console.log(`  ✅ シート「${targetSheetTitle}」の同期完了！`);
 }
 
 (async () => {
@@ -188,7 +537,7 @@ async function processMonth(page) {
     await page.waitForTimeout(3000);
 
     // ===== すべての月を巡回してデータ取得 =====
-    const allReservations = [];
+    const allDaysData = [];
 
     for (let m = 0; m < MONTHS_TO_PROCESS; m++) {
       if (m > 0) {
@@ -210,17 +559,27 @@ async function processMonth(page) {
       });
       console.log(`\n📅 ${monthLabel} を処理中...`);
       const monthRes = await processMonth(page);
-      allReservations.push(...monthRes);
+      allDaysData.push(...monthRes);
     }
 
-    console.log(`\n=== 全抽出結果: ${allReservations.length} 件 ===`);
+    // 全予約のフラットリストを作成
+    const allReservations = [];
+    const daysDataMap = {};
+    for (const day of allDaysData) {
+      daysDataMap[day.fullDate] = {
+        openSlots: day.openSlots,
+        reservations: day.reservations,
+      };
+      allReservations.push(...day.reservations);
+    }
 
-    // ===== Google Calendar 連携（差分同期・完全重複防止・自動クレンジング） =====
+    console.log(`\n=== 全抽出結果: 走査 ${allDaysData.length} 日分, 予約レッスン ${allReservations.length} 件 ===`);
+
+    // ===== 1. Google Calendar 連携（レッスン予約のみ差分同期・休みは一切登録しない） =====
     if (!process.env.GOOGLE_CALENDAR_ID || !process.env.GOOGLE_APPLICATION_CREDENTIALS) {
       console.log('※ .env にGoogleカレンダーの設定がないため、カレンダー連携はスキップされました。');
     } else {
-      console.log('Google Calendarへの連携処理（差分同期）を開始します...');
-      const { google } = require('googleapis');
+      console.log('\n--- Google Calendarへの連携処理（レッスン予約のみ差分同期）を開始します ---');
       const auth = new google.auth.GoogleAuth({
         keyFile: process.env.GOOGLE_APPLICATION_CREDENTIALS,
         scopes: ['https://www.googleapis.com/auth/calendar'],
@@ -228,7 +587,6 @@ async function processMonth(page) {
       const calendar = google.calendar({ version: 'v3', auth });
       const calendarId = process.env.GOOGLE_CALENDAR_ID;
 
-      // --- 1. 同期対象期間（当月1日〜3ヶ月後の末日）の算出 ---
       const now = new Date();
       const startYear = now.getFullYear();
       const startMonth = now.getMonth(); // 0-indexed
@@ -244,8 +602,6 @@ async function processMonth(page) {
       const rangeEnd = endStr;
       console.log(`同期対象期間: ${rangeStart} 〜 ${rangeEnd}`);
 
-      // --- 2. 期間内の既存イベントをすべて取得 ---
-      console.log(`期間内の既存イベントを検索中...`);
       let existingEvents = [];
       let pageToken = undefined;
       do {
@@ -262,7 +618,6 @@ async function processMonth(page) {
       } while (pageToken);
       console.log(`  カレンダー上の既存イベント: ${existingEvents.length} 件`);
 
-      // --- 3. メモリ上の一意化 ---
       const uniqueReservations = [];
       const seenKey = new Set();
       for (const res of allReservations) {
@@ -273,13 +628,10 @@ async function processMonth(page) {
         }
       }
 
-      // --- 4. 差分照合（Reconciliation）アルゴリズム ---
-      // 既存イベントをキーマップ化（重複している既存イベントは自動的に削除リストへ）
       const existingMap = new Map();
       const toDeleteEvents = [];
 
       for (const ev of existingEvents) {
-        // 手動登録イベント（[VOAT-SYNC] を含まないもの）は保護
         if (!ev.description || !ev.description.includes(VOAT_SYNC_MARKER)) {
           continue;
         }
@@ -293,12 +645,10 @@ async function processMonth(page) {
         if (!existingMap.has(key)) {
           existingMap.set(key, ev);
         } else {
-          // すでに同一内容のイベントが存在する（重複ゴミ）➔ 削除対象へ
           toDeleteEvents.push(ev);
         }
       }
 
-      // 追加すべき新規予定の抽出
       const toInsertReservations = [];
       for (const res of uniqueReservations) {
         const startISO = `${res.fullDate}T${res.startTime}`;
@@ -308,37 +658,32 @@ async function processMonth(page) {
         const key = `${startISO}_${endISO}_${summary}_${location}`;
 
         if (existingMap.has(key)) {
-          // すでにカレンダーに正規イベントが存在する ➔ そのまま保持
           existingMap.delete(key);
         } else {
-          // カレンダーに存在しない ➔ 新規追加
           toInsertReservations.push(res);
         }
       }
 
-      // existingMap に残ったもの ➔ VOAT側でキャンセル・時間変更された古いイベントなので削除
       for (const [key, ev] of existingMap.entries()) {
         toDeleteEvents.push(ev);
       }
 
-      // --- 5. 不要・重複・変更前イベントの削除 ---
       if (toDeleteEvents.length > 0) {
-        console.log(`\n不要・重複・変更されたイベント ${toDeleteEvents.length} 件を削除中...`);
+        console.log(`  不要・変更されたイベント ${toDeleteEvents.length} 件を削除中...`);
         for (const ev of toDeleteEvents) {
           try {
             await calendar.events.delete({ calendarId, eventId: ev.id });
-            console.log(`  [削除] ${ev.start.dateTime || ev.start.date}: ${ev.summary}`);
+            console.log(`    [削除] ${ev.start.dateTime || ev.start.date}: ${ev.summary}`);
           } catch (delErr) {
             if (delErr.code !== 410) {
-              console.error(`  [削除エラー] ${ev.summary}: ${delErr.message}`);
+              console.error(`    [削除エラー] ${ev.summary}: ${delErr.message}`);
             }
           }
         }
       }
 
-      // --- 6. 新規予定の登録 ---
       if (toInsertReservations.length > 0) {
-        console.log(`\n新規・変更イベント ${toInsertReservations.length} 件を登録中...`);
+        console.log(`  新規・変更イベント ${toInsertReservations.length} 件を登録中...`);
         for (const res of toInsertReservations) {
           const startDateTime = `${res.fullDate}T${res.startTime}:00+09:00`;
           const endDateTime = `${res.fullDate}T${res.endTime}:00+09:00`;
@@ -353,17 +698,60 @@ async function processMonth(page) {
           };
 
           try {
-            console.log(`  [登録] ${startDateTime} : ${res.title}`);
+            console.log(`    [登録] ${startDateTime} : ${res.title}`);
             await calendar.events.insert({ calendarId, requestBody: eventBody });
           } catch (apiErr) {
-            console.error(`  [エラー] ${startDateTime}: ${apiErr.message}`);
+            console.error(`    [エラー] ${startDateTime}: ${apiErr.message}`);
           }
         }
       } else {
-        console.log('\n新規追加が必要なレッスンはありません（すべて最新同期済み）。');
+        console.log('  新規追加が必要なレッスンはありません（すべて最新同期済み）。');
       }
 
-      console.log('\nGoogle Calendarへの連携が完了しました。');
+      console.log('Google Calendarへの連携が完了しました。');
+    }
+
+    // ===== 2. Google Sheets 直接同期（予約済み8pt + 休みグレー + 空き枠白） =====
+    if (!process.env.GOOGLE_APPLICATION_CREDENTIALS && !process.env.SERVICE_ACCOUNT_PATH) {
+      console.log('\n※ Google認証情報がないため、スプレッドシートへの直接同期はスキップされました。');
+    } else {
+      console.log('\n--- Googleスプレッドシートへの直接マトリックス同期を開始します ---');
+      const keyFile = process.env.GOOGLE_APPLICATION_CREDENTIALS || process.env.SERVICE_ACCOUNT_PATH;
+      const sheetsAuth = new google.auth.GoogleAuth({
+        keyFile,
+        scopes: ['https://www.googleapis.com/auth/spreadsheets'],
+      });
+      const sheets = google.sheets({ version: 'v4', auth: sheetsAuth });
+
+      const metaRes = await sheets.spreadsheets.get({ spreadsheetId: SPREADSHEET_ID });
+      const metaSheets = metaRes.data.sheets;
+
+      const now = new Date();
+      for (let m = 0; m < MONTHS_TO_PROCESS; m++) {
+        const targetDate = new Date(now.getFullYear(), now.getMonth() + m, 1);
+        const y = targetDate.getFullYear();
+        const mon = targetDate.getMonth() + 1;
+        const sheetTitle = `${y}年${mon}月`;
+
+        await syncMonthToSpreadsheet(sheets, SPREADSHEET_ID, sheetTitle, y, mon, daysDataMap, metaSheets);
+
+        // 【閲覧用】当月
+        if (m === 0) {
+          const viewCur = metaSheets.find(s => s.properties.title === '【閲覧用】当月');
+          if (viewCur) {
+            await syncMonthToSpreadsheet(sheets, SPREADSHEET_ID, '【閲覧用】当月', y, mon, daysDataMap, metaSheets);
+          }
+        }
+        // 【閲覧用】来月
+        if (m === 1) {
+          const viewNext = metaSheets.find(s => s.properties.title === '【閲覧用】来月');
+          if (viewNext) {
+            await syncMonthToSpreadsheet(sheets, SPREADSHEET_ID, '【閲覧用】来月', y, mon, daysDataMap, metaSheets);
+          }
+        }
+      }
+
+      console.log('Googleスプレッドシートへの直接マトリックス同期がすべて完了しました！');
     }
 
   } catch (error) {

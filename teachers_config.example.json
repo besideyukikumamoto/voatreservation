@@ -1,0 +1,74 @@
+[
+  {
+    "name": "隈元",
+    "loginId": "YOUR_LOGIN_ID",
+    "password": "YOUR_PASSWORD",
+    "calendarId": "f9d54c9faf1fee48e1b7bf2f8d55619e872b52502f5e80cb7c29545f9b5e884d@group.calendar.google.com"
+  },
+  {
+    "name": "杉山",
+    "loginId": "YOUR_LOGIN_ID",
+    "password": "YOUR_PASSWORD",
+    "calendarId": "voat.sugiyama@gmail.com"
+  },
+  {
+    "name": "瀬戸口",
+    "loginId": "YOUR_LOGIN_ID",
+    "password": "YOUR_PASSWORD",
+    "calendarId": "voat.setoguchi@gmail.com"
+  },
+  {
+    "name": "土田",
+    "loginId": "YOUR_LOGIN_ID",
+    "password": "YOUR_PASSWORD",
+    "calendarId": "voat.tsuchida@gmail.com"
+  },
+  {
+    "name": "松尾",
+    "loginId": "YOUR_LOGIN_ID",
+    "password": "YOUR_PASSWORD",
+    "calendarId": "voat.matsuo@gmail.com"
+  },
+  {
+    "name": "曽根",
+    "loginId": "YOUR_LOGIN_ID",
+    "password": "YOUR_PASSWORD",
+    "calendarId": "voat.sone@gmail.com"
+  },
+  {
+    "name": "井上",
+    "loginId": "YOUR_LOGIN_ID",
+    "password": "YOUR_PASSWORD",
+    "calendarId": "7c17519c1beee9804b1fc6f5ace58f8a36f78de24a29ab5971d09b75a14b766a@group.calendar.google.com"
+  },
+  {
+    "name": "松崎",
+    "loginId": "YOUR_LOGIN_ID",
+    "password": "YOUR_PASSWORD",
+    "calendarId": "voat.matsusaki@gmail.com"
+  },
+  {
+    "name": "坂井",
+    "loginId": "YOUR_LOGIN_ID",
+    "password": "YOUR_PASSWORD",
+    "calendarId": "voat.sakai@gmail.com"
+  },
+  {
+    "name": "TETSUO",
+    "loginId": "YOUR_LOGIN_ID",
+    "password": "YOUR_PASSWORD",
+    "calendarId": "0624241b60cc8949f6fd2748e46d55c06e75be38fa21cfa474487496b07b505d@group.calendar.google.com"
+  },
+  {
+    "name": "Rin",
+    "loginId": "YOUR_LOGIN_ID",
+    "password": "YOUR_PASSWORD",
+    "calendarId": "36aebc5ea4e04bcd154939cdbfe69e76bc02b3200bf7e580ba2a291cc8cd8f8a@group.calendar.google.com"
+  },
+  {
+    "name": "石井",
+    "loginId": "YOUR_LOGIN_ID",
+    "password": "YOUR_PASSWORD",
+    "calendarId": "voat.ishii@gmail.com"
+  }
+]

@@ -4,7 +4,8 @@
   "description": "VOAT Fukuoka reservation scraper",
   "main": "index.js",
   "scripts": {
-    "start": "node index.js"
+    "start": "node index.js",
+    "sync:all": "node sync_all_teachers.js"
   },
   "dependencies": {
     "dotenv": "^16.4.5",

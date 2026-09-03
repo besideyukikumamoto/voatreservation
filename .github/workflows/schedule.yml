@@ -34,9 +34,19 @@ jobs:
         run: echo '${{ secrets.GOOGLE_APPLICATION_CREDENTIALS_JSON }}' > service-account.json
 
       - name: Run Scraper
-        run: npm start
+        run: |
+          if [ -n "${{ secrets.VOAT_ACCOUNTS_JSON }}" ]; then
+            echo "Running multi-teacher master sync..."
+            node sync_all_teachers.js
+          else
+            echo "Running single-teacher sync..."
+            npm start
+          fi
         env:
           VOAT_LOGIN_ID: ${{ secrets.VOAT_LOGIN_ID }}
           VOAT_PASSWORD: ${{ secrets.VOAT_PASSWORD }}
           GOOGLE_CALENDAR_ID: ${{ secrets.GOOGLE_CALENDAR_ID }}
+          VOAT_ACCOUNTS_JSON: ${{ secrets.VOAT_ACCOUNTS_JSON }}
           GOOGLE_APPLICATION_CREDENTIALS: ./service-account.json
+          SPREADSHEET_ID: ${{ secrets.SPREADSHEET_ID || '1vwLDxLeLrUb6icuYU9M0w4feTPpNf_mPxRItHSS30s4' }}
+

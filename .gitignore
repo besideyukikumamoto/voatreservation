@@ -1,5 +1,7 @@
 node_modules/
 .env
 service-account.json
+teachers_config.json
 page.html
 screenshot.png
+login_error.png
