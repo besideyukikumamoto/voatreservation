@@ -23,6 +23,18 @@ const COLOR_OFF = { red: 0.8509804, green: 0.8509804, blue: 0.8509804 };    // #
 
 const DAY_NAMES = ['日', '月', '火', '水', '木', '金', '土'];
 
+// 列インデックス（1-based: 1=A, 26=Z, 27=AA, 32=AF）からアルファベット表記を算出
+function getColumnLetter(colIndex) {
+  let letter = '';
+  let temp = colIndex;
+  while (temp > 0) {
+    const mod = (temp - 1) % 26;
+    letter = String.fromCharCode(65 + mod) + letter;
+    temp = Math.floor((temp - mod) / 26);
+  }
+  return letter;
+}
+
 /**
  * 1つの月シートまたは閲覧用シートにマトリックスを同期
  */
@@ -30,9 +42,10 @@ async function syncMonthToSpreadsheet(sheets, spreadsheetId, targetSheetTitle, y
   let targetSheet = metaSheets.find(s => s.properties.title === targetSheetTitle);
   let sheetId;
   const isNewSheet = !targetSheet;
+  let dimensionChanged = false;
 
   const daysInMonth = new Date(year, month, 0).getDate();
-  const reqCols = daysInMonth + 1; // A列(時間) + 1〜daysInMonth
+  const reqCols = daysInMonth + 1; // A列(時間) + 1〜daysInMonth (30日の月=31列, 31日の月=32列)
   const reqRows = TIME_SLOTS.length + 2; // 1行目:曜日, 2行目:日付, 3〜24行目:データ (計24行)
 
   if (isNewSheet) {
@@ -60,6 +73,39 @@ async function syncMonthToSpreadsheet(sheets, spreadsheetId, targetSheetTitle, y
     sheetId = addRes.data.replies[0].addSheet.properties.sheetId;
   } else {
     sheetId = targetSheet.properties.sheetId;
+    const currentCols = targetSheet.properties.gridProperties?.columnCount || 0;
+    const currentRows = targetSheet.properties.gridProperties?.rowCount || 0;
+
+    // 【重要・月替わり対応】30日月 ➔ 31日月 等で列数が不足・変動している場合は即座にグリッドサイズを自動拡張/調整
+    if (currentCols !== reqCols || currentRows !== reqRows) {
+      dimensionChanged = true;
+      console.log(`  📐 シート「${targetSheetTitle}」のサイズを自動調整中: ${currentCols}列 -> ${reqCols}列`);
+      await sheets.spreadsheets.batchUpdate({
+        spreadsheetId,
+        requestBody: {
+          requests: [
+            {
+              updateSheetProperties: {
+                properties: {
+                  sheetId,
+                  gridProperties: {
+                    rowCount: reqRows,
+                    columnCount: reqCols,
+                    frozenRowCount: 2,
+                    frozenColumnCount: 1,
+                  },
+                },
+                fields: 'gridProperties(rowCount,columnCount,frozenRowCount,frozenColumnCount)',
+              },
+            },
+          ],
+        },
+      });
+      if (targetSheet.properties.gridProperties) {
+        targetSheet.properties.gridProperties.columnCount = reqCols;
+        targetSheet.properties.gridProperties.rowCount = reqRows;
+      }
+    }
   }
 
   console.log(`  📊 シート「${targetSheetTitle}」(ID: ${sheetId}) のマトリックス同期中...`);
@@ -68,7 +114,7 @@ async function syncMonthToSpreadsheet(sheets, spreadsheetId, targetSheetTitle, y
   let existingPastCells = null;
   if (isCurrentMonth && todayDate > 1 && !isNewSheet) {
     try {
-      const pastEndColLetter = String.fromCharCode(65 + todayDate - 1); // A=時間, B=1日, C=2日...
+      const pastEndColLetter = getColumnLetter(todayDate); // B=1日, C=2日... 過去日の最終列文字
       const pastRes = await sheets.spreadsheets.get({
         spreadsheetId,
         ranges: [`${targetSheetTitle}!B3:${pastEndColLetter}24`],
@@ -285,8 +331,8 @@ async function syncMonthToSpreadsheet(sheets, spreadsheetId, targetSheetTitle, y
     ...mergeRequests,
   ];
 
-  // 【API軽量化】新規作成シートの場合のみ枠線・列幅・行高さを適用（既存シートはスキップしてAPI消費を削減）
-  if (isNewSheet) {
+  // 【API軽量化】新規作成シートまたはサイズ変更時のみ枠線・列幅・行高さを適用（既存シートはスキップしてAPI消費を削減）
+  if (isNewSheet || dimensionChanged) {
     updateRequests.push(
       {
         updateBorders: {
