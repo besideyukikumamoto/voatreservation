@@ -6,7 +6,8 @@ const { syncAllMonthsToSpreadsheet } = require('./src/sheetSync');
 const { sendErrorAlert } = require('./src/notifier');
 
 const MONTHS_TO_PROCESS = 3; // 処理する月数（当月含む3ヶ月分）
-const SPREADSHEET_ID = process.env.SPREADSHEET_ID || '1vwLDxLeLrUb6icuYU9M0w4feTPpNf_mPxRItHSS30s4';
+const KUMAMOTO_LOGIN_ID = 'beside.yuki.kumamoto@gmail.com';
+const KUMAMOTO_SPREADSHEET_ID = '1vwLDxLeLrUb6icuYU9M0w4feTPpNf_mPxRItHSS30s4';
 const KEY_FILE_PATH = process.env.GOOGLE_APPLICATION_CREDENTIALS || process.env.SERVICE_ACCOUNT_PATH || path.join(__dirname, 'service-account.json');
 
 (async () => {
@@ -55,9 +56,20 @@ const KEY_FILE_PATH = process.env.GOOGLE_APPLICATION_CREDENTIALS || process.env.
 
     // ----------------------------------------------------
     // Step 3: Google Sheets 直接マトリックス同期（休みグレー＆8pt固定＆手動グレー保護）
+    // ※他講師のアカウントで隈元先生のスプレッドシートが上書きされるのを防ぐため、
+    //   隈元先生のアカウント時、または独自SPREADSHEET_IDが明示指定されている場合のみ実行
     // ----------------------------------------------------
-    console.log('\n【Step 3】Googleスプレッドシートへの直接同期を開始します（手動グレー保護版）...');
-    await syncAllMonthsToSpreadsheet(daysDataMap, SPREADSHEET_ID, KEY_FILE_PATH, MONTHS_TO_PROCESS);
+    const isKumamoto = (loginId.trim().toLowerCase() === KUMAMOTO_LOGIN_ID);
+    const targetSpreadsheetId = isKumamoto
+      ? (process.env.SPREADSHEET_ID || KUMAMOTO_SPREADSHEET_ID)
+      : (process.env.SPREADSHEET_ID && process.env.SPREADSHEET_ID !== KUMAMOTO_SPREADSHEET_ID ? process.env.SPREADSHEET_ID : '');
+
+    if (targetSpreadsheetId) {
+      console.log('\n【Step 3】Googleスプレッドシートへの直接同期を開始します（手動グレー保護＆隔離対応版）...');
+      await syncAllMonthsToSpreadsheet(daysDataMap, targetSpreadsheetId, KEY_FILE_PATH, MONTHS_TO_PROCESS);
+    } else {
+      console.log('\n【Step 3】スプレッドシートIDが未設定のため、Google Calendar同期のみで完了します。');
+    }
 
     const elapsedSec = ((Date.now() - startTime) / 1000).toFixed(1);
     console.log('\n==============================================');

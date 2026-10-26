@@ -110,8 +110,9 @@ async function syncMonthToSpreadsheet(sheets, spreadsheetId, targetSheetTitle, y
 
   console.log(`  📊 シート「${targetSheetTitle}」(ID: ${sheetId}) のマトリックス同期中...`);
 
-  // 【重要】既存シートの全セルデータを読み取って、手動設定されたグレー枠（休み）や結合予約枠を保護
+  // 【重要】既存シートの全セルデータおよび結合情報を読み取って、手動設定されたグレー枠（休み）や結合予約枠を保護
   let existingGridData = null;
+  let existingMerges = [];
   if (!isNewSheet) {
     try {
       const endColLetter = getColumnLetter(daysInMonth + 1);
@@ -120,8 +121,11 @@ async function syncMonthToSpreadsheet(sheets, spreadsheetId, targetSheetTitle, y
         ranges: [`${targetSheetTitle}!B3:${endColLetter}24`],
         includeGridData: true,
       });
-      if (pastRes.data.sheets && pastRes.data.sheets[0].data && pastRes.data.sheets[0].data[0].rowData) {
-        existingGridData = pastRes.data.sheets[0].data[0].rowData;
+      if (pastRes.data.sheets && pastRes.data.sheets[0]) {
+        existingMerges = pastRes.data.sheets[0].merges || [];
+        if (pastRes.data.sheets[0].data && pastRes.data.sheets[0].data[0].rowData) {
+          existingGridData = pastRes.data.sheets[0].data[0].rowData;
+        }
       }
     } catch (readErr) {
       console.warn(`    ⚠️ 既存セル読み取りスキップ (${targetSheetTitle}): ${readErr.message}`);
@@ -278,11 +282,30 @@ async function syncMonthToSpreadsheet(sheets, spreadsheetId, targetSheetTitle, y
             });
           }
         }
-      } else if (oldFormattedVal === '予約済み') {
-        // 2. 出張や終日イベント等で手動設定・結合された予約枠は白に戻さず保護
-        cellValue = '予約済み';
-        cellBg = oldCell?.userEnteredFormat?.backgroundColor || defaultBg;
+      } else if (isOldGrey || oldFormattedVal === '予約済み') {
+        // 2. 手動設定されたグレー枠（11/17 16時以降休み等）や出張等の結合予約枠は白に戻さず保護
+        cellValue = oldFormattedVal;
+        cellBg = isOldGrey ? COLOR_OFF : (oldCell?.userEnteredFormat?.backgroundColor || defaultBg);
         cellFontSize = oldCell?.userEnteredFormat?.textFormat?.fontSize || 8;
+
+        // 既存の手動結合（出張等の縦結合）があればそのまま維持
+        const matchedOldMerge = existingMerges.find(
+          m => m.startColumnIndex === colIdx && m.endColumnIndex === colIdx + 1 && m.startRowIndex === 2 + rIdx
+        );
+        if (matchedOldMerge) {
+          mergeRequests.push({
+            mergeCells: {
+              range: {
+                sheetId,
+                startRowIndex: matchedOldMerge.startRowIndex,
+                endRowIndex: matchedOldMerge.endRowIndex,
+                startColumnIndex: colIdx,
+                endColumnIndex: colIdx + 1,
+              },
+              mergeType: 'MERGE_ALL',
+            },
+          });
+        }
       } else if (isOpen) {
         // 3. VOATマイページで受付中の稼働スロット -> 白（土日は土日背景色）
         cellValue = '';
@@ -424,23 +447,24 @@ async function syncAllMonthsToSpreadsheet(daysDataMap, spreadsheetId, keyFilePat
     const targetDate = new Date(now.getFullYear(), now.getMonth() + m, 1);
     const y = targetDate.getFullYear();
     const mon = targetDate.getMonth() + 1;
-    const sheetTitle = `${y}年${mon}月`;
+    // 他講師の旧スクレイパー（スペースなし）と完全に隔離するため、年と月の間に半角スペースを入れた専用シート名を使用
+    const sheetTitle = `${y}年 ${mon}月`;
     const isCurrentMonth = (m === 0);
 
     await syncMonthToSpreadsheet(sheets, spreadsheetId, sheetTitle, y, mon, daysDataMap, metaSheets, isCurrentMonth, todayDate);
 
-    // 【閲覧用】当月
+    // 【閲覧用】今月
     if (m === 0) {
-      const viewCur = metaSheets.find(s => s.properties.title === '【閲覧用】当月');
+      const viewCur = metaSheets.find(s => s.properties.title === '【閲覧用】今月');
       if (viewCur) {
-        await syncMonthToSpreadsheet(sheets, spreadsheetId, '【閲覧用】当月', y, mon, daysDataMap, metaSheets, isCurrentMonth, todayDate);
+        await syncMonthToSpreadsheet(sheets, spreadsheetId, '【閲覧用】今月', y, mon, daysDataMap, metaSheets, isCurrentMonth, todayDate);
       }
     }
-    // 【閲覧用】来月
+    // 【閲覧用】翌月
     if (m === 1) {
-      const viewNext = metaSheets.find(s => s.properties.title === '【閲覧用】来月');
+      const viewNext = metaSheets.find(s => s.properties.title === '【閲覧用】翌月');
       if (viewNext) {
-        await syncMonthToSpreadsheet(sheets, spreadsheetId, '【閲覧用】来月', y, mon, daysDataMap, metaSheets, false, 1);
+        await syncMonthToSpreadsheet(sheets, spreadsheetId, '【閲覧用】翌月', y, mon, daysDataMap, metaSheets, false, 1);
       }
     }
   }

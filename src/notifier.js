@@ -2,6 +2,7 @@
  * LINE Messaging API を使用したエラー・アラート通知モジュール
  */
 
+const KUMAMOTO_LOGIN_ID = 'beside.yuki.kumamoto@gmail.com';
 const DEFAULT_LINE_TOKEN = 'Nmla7Cogq/6jILUzytIw8KmrB54KaXUzOvmroMZcg0ns4K/jToWVJjmVNe+Nu2weHCrgsXvbvQiboHCP7FLGEgAyjLnvWTDRCjAAtaQoH5ynVxuJ6vnfskVKsuPf2laSW71yIEuuY9hHzNAJLZEKvQdB04t89/1O/w1cDnyilFU=';
 const DEFAULT_USER_ID = 'U1c94008254a2d065c85b9eed253ccf12';
 
@@ -11,8 +12,13 @@ const DEFAULT_USER_ID = 'U1c94008254a2d065c85b9eed253ccf12';
  * @returns {Promise<boolean>} 送信成功可否
  */
 async function sendLineMessage(text) {
-  const token = process.env.LINE_CHANNEL_ACCESS_TOKEN || DEFAULT_LINE_TOKEN;
-  const userId = process.env.LINE_ADMIN_USER_ID || DEFAULT_USER_ID;
+  const isKumamoto = ((process.env.VOAT_LOGIN_ID || '').trim().toLowerCase() === KUMAMOTO_LOGIN_ID);
+  const token = isKumamoto
+    ? (process.env.LINE_CHANNEL_ACCESS_TOKEN || DEFAULT_LINE_TOKEN)
+    : (process.env.LINE_CHANNEL_ACCESS_TOKEN && process.env.LINE_CHANNEL_ACCESS_TOKEN !== DEFAULT_LINE_TOKEN ? process.env.LINE_CHANNEL_ACCESS_TOKEN : '');
+  const userId = isKumamoto
+    ? (process.env.LINE_ADMIN_USER_ID || DEFAULT_USER_ID)
+    : (process.env.LINE_ADMIN_USER_ID && process.env.LINE_ADMIN_USER_ID !== DEFAULT_USER_ID ? process.env.LINE_ADMIN_USER_ID : '');
 
   if (!token || !userId) {
     console.warn('⚠️ LINE設定（トークンまたはユーザーID）が見つからないため、通知をスキップします。');
