@@ -56,8 +56,12 @@ const KEY_FILE_PATH = process.env.GOOGLE_APPLICATION_CREDENTIALS || process.env.
     // ----------------------------------------------------
     // Step 3: Google Sheets 直接マトリックス同期（休みグレー＆8pt固定）
     // ----------------------------------------------------
-    console.log('\n【Step 3】Googleスプレッドシートへの直接同期を開始します...');
-    await syncAllMonthsToSpreadsheet(daysDataMap, SPREADSHEET_ID, KEY_FILE_PATH, MONTHS_TO_PROCESS);
+    if (process.env.ENABLE_SHEET_SYNC === 'true') {
+      console.log('\n【Step 3】Googleスプレッドシートへの直接同期を開始します...');
+      await syncAllMonthsToSpreadsheet(daysDataMap, SPREADSHEET_ID, KEY_FILE_PATH, MONTHS_TO_PROCESS);
+    } else {
+      console.log('\n【Step 3】Googleスプレッドシートへの直接同期は保護のためスキップされました（ENABLE_SHEET_SYNC!=true）。手動設定または検証後に有効化してください。');
+    }
 
     const elapsedSec = ((Date.now() - startTime) / 1000).toFixed(1);
     console.log('\n==============================================');
