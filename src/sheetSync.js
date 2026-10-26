@@ -237,7 +237,7 @@ async function syncMonthToSpreadsheet(sheets, spreadsheetId, targetSheetTitle, y
       let cellFontSize = 8;
 
       if (resList.length > 0) {
-        // 新規レッスン予約がある場合
+        // 1. VOATマイページから取得した新規レッスン予約がある場合
         const ev = resList[0];
         const upper = (ev.title || '').toUpperCase().replace(/[Ａ-Ｚ]/g, s => String.fromCharCode(s.charCodeAt(0) - 0xFEE0));
         const isGroup = upper.includes('GROUP');
@@ -278,18 +278,18 @@ async function syncMonthToSpreadsheet(sheets, spreadsheetId, targetSheetTitle, y
             });
           }
         }
-      } else if (isOldGrey || oldFormattedVal === '予約済み') {
-        // 【手動設定保護】既存セルがグレー（休み）または手動で設定された予約枠（出張等）の場合、白に戻さず保護！
-        cellValue = oldFormattedVal;
-        cellBg = isOldGrey ? COLOR_OFF : (oldCell?.userEnteredFormat?.backgroundColor || defaultBg);
+      } else if (oldFormattedVal === '予約済み') {
+        // 2. 出張や終日イベント等で手動設定・結合された予約枠は白に戻さず保護
+        cellValue = '予約済み';
+        cellBg = oldCell?.userEnteredFormat?.backgroundColor || defaultBg;
         cellFontSize = oldCell?.userEnteredFormat?.textFormat?.fontSize || 8;
       } else if (isOpen) {
-        // 稼働中（予約なし・受付中） -> 白 / 土日色
+        // 3. VOATマイページで受付中の稼働スロット -> 白（土日は土日背景色）
         cellValue = '';
         cellBg = defaultBg;
         cellFontSize = 8;
       } else {
-        // 休みに設定（非稼働枠・休日） -> グレー
+        // 4. VOATマイページで予約枠を設定していない時間帯・休講日 -> 自動でグレー（#d9d9d9）！
         cellValue = '';
         cellBg = COLOR_OFF;
         cellFontSize = 8;
