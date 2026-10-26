@@ -54,14 +54,10 @@ const KEY_FILE_PATH = process.env.GOOGLE_APPLICATION_CREDENTIALS || process.env.
     await syncReservationsToCalendar(allReservations, calendarId, KEY_FILE_PATH, MONTHS_TO_PROCESS);
 
     // ----------------------------------------------------
-    // Step 3: Google Sheets 直接マトリックス同期（休みグレー＆8pt固定）
+    // Step 3: Google Sheets 直接マトリックス同期（休みグレー＆8pt固定＆手動グレー保護）
     // ----------------------------------------------------
-    if (process.env.ENABLE_SHEET_SYNC === 'true') {
-      console.log('\n【Step 3】Googleスプレッドシートへの直接同期を開始します...');
-      await syncAllMonthsToSpreadsheet(daysDataMap, SPREADSHEET_ID, KEY_FILE_PATH, MONTHS_TO_PROCESS);
-    } else {
-      console.log('\n【Step 3】Googleスプレッドシートへの直接同期は保護のためスキップされました（ENABLE_SHEET_SYNC!=true）。手動設定または検証後に有効化してください。');
-    }
+    console.log('\n【Step 3】Googleスプレッドシートへの直接同期を開始します（手動グレー保護版）...');
+    await syncAllMonthsToSpreadsheet(daysDataMap, SPREADSHEET_ID, KEY_FILE_PATH, MONTHS_TO_PROCESS);
 
     const elapsedSec = ((Date.now() - startTime) / 1000).toFixed(1);
     console.log('\n==============================================');

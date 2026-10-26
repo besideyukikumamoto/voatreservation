@@ -110,21 +110,21 @@ async function syncMonthToSpreadsheet(sheets, spreadsheetId, targetSheetTitle, y
 
   console.log(`  📊 シート「${targetSheetTitle}」(ID: ${sheetId}) のマトリックス同期中...`);
 
-  // 当月で過去日をスキップした場合、既存の過去日セルのデータを読み取って保護
-  let existingPastCells = null;
-  if (isCurrentMonth && todayDate > 1 && !isNewSheet) {
+  // 【重要】既存シートの全セルデータを読み取って、手動設定されたグレー枠（休み）や結合予約枠を保護
+  let existingGridData = null;
+  if (!isNewSheet) {
     try {
-      const pastEndColLetter = getColumnLetter(todayDate); // B=1日, C=2日... 過去日の最終列文字
+      const endColLetter = getColumnLetter(daysInMonth + 1);
       const pastRes = await sheets.spreadsheets.get({
         spreadsheetId,
-        ranges: [`${targetSheetTitle}!B3:${pastEndColLetter}24`],
+        ranges: [`${targetSheetTitle}!B3:${endColLetter}24`],
         includeGridData: true,
       });
       if (pastRes.data.sheets && pastRes.data.sheets[0].data && pastRes.data.sheets[0].data[0].rowData) {
-        existingPastCells = pastRes.data.sheets[0].data[0].rowData;
+        existingGridData = pastRes.data.sheets[0].data[0].rowData;
       }
     } catch (readErr) {
-      console.warn(`    ⚠️ 過去日セル読み取りスキップ (${targetSheetTitle}): ${readErr.message}`);
+      console.warn(`    ⚠️ 既存セル読み取りスキップ (${targetSheetTitle}): ${readErr.message}`);
     }
   }
 
@@ -188,23 +188,32 @@ async function syncMonthToSpreadsheet(sheets, spreadsheetId, targetSheetTitle, y
       const dateKey = `${year}-${String(month).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
       const dayData = daysDataMap[dateKey];
 
+      // 既存セルの状態（手動設定のグレーや予約枠）をチェック
+      let oldCell = null;
+      let isOldGrey = false;
+      let oldFormattedVal = '';
+      if (existingGridData && existingGridData[rIdx] && existingGridData[rIdx].values && existingGridData[rIdx].values[d - 1]) {
+        oldCell = existingGridData[rIdx].values[d - 1];
+        oldFormattedVal = oldCell.formattedValue || (oldCell.userEnteredValue ? oldCell.userEnteredValue.stringValue : '') || '';
+        const bg = oldCell.userEnteredFormat?.backgroundColor || {};
+        const r_c = bg.red ?? 1;
+        const g_c = bg.green ?? 1;
+        const b_c = bg.blue ?? 1;
+        isOldGrey = (r_c < 0.95 && g_c < 0.95 && b_c < 0.95 && Math.abs(r_c - g_c) < 0.05);
+      }
+
       // 【過去日保護】当月かつ今日より前でスキップされ、既存セルデータがある場合
-      if (isCurrentMonth && d < todayDate && existingPastCells && existingPastCells[rIdx]) {
-        const pastRow = existingPastCells[rIdx];
-        const pastCellIdx = d - 1;
-        if (pastRow.values && pastRow.values[pastCellIdx]) {
-          const oldCell = pastRow.values[pastCellIdx];
-          rowCells.push({
-            userEnteredValue: oldCell.userEnteredValue || (oldCell.formattedValue ? { stringValue: oldCell.formattedValue } : { stringValue: '' }),
-            userEnteredFormat: oldCell.userEnteredFormat || {
-              horizontalAlignment: 'CENTER',
-              verticalAlignment: 'MIDDLE',
-              textFormat: { bold: true, fontSize: 8 },
-              backgroundColor: defaultBg,
-            },
-          });
-          continue;
-        }
+      if (isCurrentMonth && d < todayDate && oldCell) {
+        rowCells.push({
+          userEnteredValue: oldCell.userEnteredValue || (oldCell.formattedValue ? { stringValue: oldCell.formattedValue } : { stringValue: '' }),
+          userEnteredFormat: oldCell.userEnteredFormat || {
+            horizontalAlignment: 'CENTER',
+            verticalAlignment: 'MIDDLE',
+            textFormat: { bold: true, fontSize: 8 },
+            backgroundColor: defaultBg,
+          },
+        });
+        continue;
       }
 
       // 新規データまたは未来日のデータ構築
@@ -228,6 +237,7 @@ async function syncMonthToSpreadsheet(sheets, spreadsheetId, targetSheetTitle, y
       let cellFontSize = 8;
 
       if (resList.length > 0) {
+        // 新規レッスン予約がある場合
         const ev = resList[0];
         const upper = (ev.title || '').toUpperCase().replace(/[Ａ-Ｚ]/g, s => String.fromCharCode(s.charCodeAt(0) - 0xFEE0));
         const isGroup = upper.includes('GROUP');
@@ -268,6 +278,11 @@ async function syncMonthToSpreadsheet(sheets, spreadsheetId, targetSheetTitle, y
             });
           }
         }
+      } else if (isOldGrey || oldFormattedVal === '予約済み') {
+        // 【手動設定保護】既存セルがグレー（休み）または手動で設定された予約枠（出張等）の場合、白に戻さず保護！
+        cellValue = oldFormattedVal;
+        cellBg = isOldGrey ? COLOR_OFF : (oldCell?.userEnteredFormat?.backgroundColor || defaultBg);
+        cellFontSize = oldCell?.userEnteredFormat?.textFormat?.fontSize || 8;
       } else if (isOpen) {
         // 稼働中（予約なし・受付中） -> 白 / 土日色
         cellValue = '';
