@@ -37,8 +37,9 @@ function getColumnLetter(colIndex) {
 
 /**
  * 1つの月シートまたは閲覧用シートにマトリックスを同期
+ * @param {string|null} sourceSheetTitle 閲覧用シート同期時に参照する元月シート名（月替わり時の前月データ混入・結合競合を防止）
  */
-async function syncMonthToSpreadsheet(sheets, spreadsheetId, targetSheetTitle, year, month, daysDataMap, metaSheets, isCurrentMonth = false, todayDate = 1) {
+async function syncMonthToSpreadsheet(sheets, spreadsheetId, targetSheetTitle, year, month, daysDataMap, metaSheets, isCurrentMonth = false, todayDate = 1, sourceSheetTitle = null) {
   let targetSheet = metaSheets.find(s => s.properties.title === targetSheetTitle);
   let sheetId;
   const isNewSheet = !targetSheet;
@@ -110,25 +111,34 @@ async function syncMonthToSpreadsheet(sheets, spreadsheetId, targetSheetTitle, y
 
   console.log(`  📊 シート「${targetSheetTitle}」(ID: ${sheetId}) のマトリックス同期中...`);
 
-  // 【重要】既存シートの全セルデータおよび結合情報を読み取って、手動設定されたグレー枠（休み）や結合予約枠を保護
+  // 【重要】既存シート（閲覧用シートの場合は対応する当月/翌月シート）の全セルデータおよび結合情報を読み取って、手動設定されたグレー枠（休み）や結合予約枠を保護
   let existingGridData = null;
   let existingMerges = [];
-  if (!isNewSheet) {
+  const readSheetTitle = sourceSheetTitle || targetSheetTitle;
+  const readTargetSheet = metaSheets.find(s => s.properties.title === readSheetTitle);
+  if (readTargetSheet) {
     try {
       const endColLetter = getColumnLetter(daysInMonth + 1);
       const pastRes = await sheets.spreadsheets.get({
         spreadsheetId,
-        ranges: [`${targetSheetTitle}!B3:${endColLetter}24`],
+        ranges: [`${readSheetTitle}!B1:${endColLetter}24`],
         includeGridData: true,
       });
       if (pastRes.data.sheets && pastRes.data.sheets[0]) {
-        existingMerges = pastRes.data.sheets[0].merges || [];
-        if (pastRes.data.sheets[0].data && pastRes.data.sheets[0].data[0].rowData) {
-          existingGridData = pastRes.data.sheets[0].data[0].rowData;
+        const allRows = pastRes.data.sheets[0].data?.[0]?.rowData || [];
+        const expectedFirstDayName = DAY_NAMES[new Date(year, month - 1, 1).getDay()];
+        const actualFirstDayName = allRows[0]?.values?.[0]?.formattedValue || allRows[0]?.values?.[0]?.userEnteredValue?.stringValue || '';
+
+        // 1日（B1セル）の曜日が対象年月と一致する場合のみ既存データを引き継ぐ（月替わり直後の前月データ混入を100%防止）
+        if (!actualFirstDayName || actualFirstDayName === expectedFirstDayName) {
+          existingMerges = pastRes.data.sheets[0].merges || [];
+          existingGridData = allRows.slice(2); // 3行目（index 2）以降がデータ行
+        } else {
+          console.log(`    🔄 月替わりを検知したため前月データの引き継ぎをリセットします (${readSheetTitle}: ${actualFirstDayName} -> ${expectedFirstDayName})`);
         }
       }
     } catch (readErr) {
-      console.warn(`    ⚠️ 既存セル読み取りスキップ (${targetSheetTitle}): ${readErr.message}`);
+      console.warn(`    ⚠️ 既存セル読み取りスキップ (${readSheetTitle}): ${readErr.message}`);
     }
   }
 
@@ -217,6 +227,23 @@ async function syncMonthToSpreadsheet(sheets, spreadsheetId, targetSheetTitle, y
             backgroundColor: defaultBg,
           },
         });
+        const matchedPastMerge = existingMerges.find(
+          m => m.startColumnIndex === colIdx && m.endColumnIndex === colIdx + 1 && m.startRowIndex === 2 + rIdx
+        );
+        if (matchedPastMerge && matchedPastMerge.endRowIndex > matchedPastMerge.startRowIndex + 1) {
+          mergeRequests.push({
+            mergeCells: {
+              range: {
+                sheetId,
+                startRowIndex: matchedPastMerge.startRowIndex,
+                endRowIndex: Math.min(matchedPastMerge.endRowIndex, reqRows),
+                startColumnIndex: colIdx,
+                endColumnIndex: colIdx + 1,
+              },
+              mergeType: 'MERGE_ALL',
+            },
+          });
+        }
         continue;
       }
 
@@ -288,23 +315,42 @@ async function syncMonthToSpreadsheet(sheets, spreadsheetId, targetSheetTitle, y
         cellBg = isOldGrey ? COLOR_OFF : (oldCell?.userEnteredFormat?.backgroundColor || defaultBg);
         cellFontSize = oldCell?.userEnteredFormat?.textFormat?.fontSize || 8;
 
-        // 既存の手動結合（出張等の縦結合）があればそのまま維持
+        // 既存の手動結合（出張等の縦結合）があれば、その範囲内に新規VOAT予約が入っていない場合のみ維持
         const matchedOldMerge = existingMerges.find(
           m => m.startColumnIndex === colIdx && m.endColumnIndex === colIdx + 1 && m.startRowIndex === 2 + rIdx
         );
-        if (matchedOldMerge) {
-          mergeRequests.push({
-            mergeCells: {
-              range: {
-                sheetId,
-                startRowIndex: matchedOldMerge.startRowIndex,
-                endRowIndex: matchedOldMerge.endRowIndex,
-                startColumnIndex: colIdx,
-                endColumnIndex: colIdx + 1,
+        if (matchedOldMerge && matchedOldMerge.endRowIndex > matchedOldMerge.startRowIndex + 1) {
+          const mergeStartSlot = matchedOldMerge.startRowIndex - 2;
+          const mergeEndSlot = Math.min(matchedOldMerge.endRowIndex, reqRows) - 2;
+          let hasConflictWithNewRes = false;
+          for (let sIdx = mergeStartSlot; sIdx < mergeEndSlot; sIdx++) {
+            const slotTime = TIME_SLOTS[sIdx];
+            if (!slotTime) continue;
+            const [th, tm] = slotTime.split(':').map(Number);
+            const curM = th * 60 + tm;
+            if (dayInfo.reservations.some(res => {
+              const [sh, sm] = res.startTime.split(':').map(Number);
+              const [eh, em] = res.endTime.split(':').map(Number);
+              return curM >= sh * 60 + sm && curM < eh * 60 + em;
+            })) {
+              hasConflictWithNewRes = true;
+              break;
+            }
+          }
+          if (!hasConflictWithNewRes) {
+            mergeRequests.push({
+              mergeCells: {
+                range: {
+                  sheetId,
+                  startRowIndex: matchedOldMerge.startRowIndex,
+                  endRowIndex: Math.min(matchedOldMerge.endRowIndex, reqRows),
+                  startColumnIndex: colIdx,
+                  endColumnIndex: colIdx + 1,
+                },
+                mergeType: 'MERGE_ALL',
               },
-              mergeType: 'MERGE_ALL',
-            },
-          });
+            });
+          }
         }
       } else if (isOpen) {
         // 3. VOATマイページで受付中の稼働スロット -> 白（土日は土日背景色）
@@ -331,6 +377,23 @@ async function syncMonthToSpreadsheet(sheets, spreadsheetId, targetSheetTitle, y
     }
 
     dataRows.push({ values: rowCells });
+  }
+
+  // 同一列内で重複・交差する結合リクエストがあれば安全に除外（APIの mergeCells 競合エラーを100%防止）
+  const safeMergeRequests = [];
+  for (const req of mergeRequests) {
+    const r = req.mergeCells.range;
+    const hasOverlap = safeMergeRequests.some(existing => {
+      const er = existing.mergeCells.range;
+      return (
+        er.startColumnIndex === r.startColumnIndex &&
+        r.startRowIndex < er.endRowIndex &&
+        er.startRowIndex < r.endRowIndex
+      );
+    });
+    if (!hasOverlap) {
+      safeMergeRequests.push(req);
+    }
   }
 
   // batchUpdate リクエストの組み立て（既存シート時は枠線・列幅等の再描画を省略して高速化）
@@ -366,7 +429,7 @@ async function syncMonthToSpreadsheet(sheets, spreadsheetId, targetSheetTitle, y
       },
     },
     // 3. 予約ブロックの結合
-    ...mergeRequests,
+    ...safeMergeRequests,
   ];
 
   // 【API軽量化】新規作成シートまたはサイズ変更時のみ枠線・列幅・行高さを適用（既存シートはスキップしてAPI消費を削減）
@@ -440,7 +503,8 @@ async function syncAllMonthsToSpreadsheet(daysDataMap, spreadsheetId, keyFilePat
   const metaRes = await sheets.spreadsheets.get({ spreadsheetId });
   const metaSheets = metaRes.data.sheets;
 
-  const now = new Date();
+  // 日本時間（JST）基準で現在日時を取得
+  const now = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Tokyo' }));
   const todayDate = now.getDate();
 
   for (let m = 0; m < monthsToProcess; m++) {
@@ -453,18 +517,18 @@ async function syncAllMonthsToSpreadsheet(daysDataMap, spreadsheetId, keyFilePat
 
     await syncMonthToSpreadsheet(sheets, spreadsheetId, sheetTitle, y, mon, daysDataMap, metaSheets, isCurrentMonth, todayDate);
 
-    // 【閲覧用】今月
+    // 【閲覧用】今月（元月シート sheetTitle の保護データを参照してミラー同期）
     if (m === 0) {
       const viewCur = metaSheets.find(s => s.properties.title === '【閲覧用】今月');
       if (viewCur) {
-        await syncMonthToSpreadsheet(sheets, spreadsheetId, '【閲覧用】今月', y, mon, daysDataMap, metaSheets, isCurrentMonth, todayDate);
+        await syncMonthToSpreadsheet(sheets, spreadsheetId, '【閲覧用】今月', y, mon, daysDataMap, metaSheets, isCurrentMonth, todayDate, sheetTitle);
       }
     }
-    // 【閲覧用】翌月
+    // 【閲覧用】翌月（元月シート sheetTitle の保護データを参照してミラー同期）
     if (m === 1) {
       const viewNext = metaSheets.find(s => s.properties.title === '【閲覧用】翌月');
       if (viewNext) {
-        await syncMonthToSpreadsheet(sheets, spreadsheetId, '【閲覧用】翌月', y, mon, daysDataMap, metaSheets, false, 1);
+        await syncMonthToSpreadsheet(sheets, spreadsheetId, '【閲覧用】翌月', y, mon, daysDataMap, metaSheets, false, 1, sheetTitle);
       }
     }
   }
