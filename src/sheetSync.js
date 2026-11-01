@@ -23,6 +23,27 @@ const COLOR_OFF = { red: 0.8509804, green: 0.8509804, blue: 0.8509804 };    // #
 
 const DAY_NAMES = ['日', '月', '火', '水', '木', '金', '土'];
 
+/**
+ * Google Sheets API 一時的エラー（429 / 5xx / 通信瞬断）の自動リトライ補助関数
+ */
+async function withSheetRetry(fn, label, maxRetries = 3) {
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      return await fn();
+    } catch (err) {
+      const code = err.code || err.status || 0;
+      const isRetryable = code === 429 || code === 500 || code === 502 || code === 503 || code === 504 ||
+        /ECONNRESET|ETIMEDOUT|ENOTFOUND|socket hang up|Rate Limit|Quota exceeded|Backend Error/i.test(err.message || '');
+      if (!isRetryable || attempt >= maxRetries) {
+        throw err;
+      }
+      const waitMs = 1500 * Math.pow(2, attempt - 1);
+      console.warn(`    ⚠️ Google Sheets API 一時エラー (${label}) - ${waitMs}ms 後にリトライします (${attempt}/${maxRetries}): ${err.message}`);
+      await new Promise(r => setTimeout(r, waitMs));
+    }
+  }
+}
+
 // 列インデックス（1-based: 1=A, 26=Z, 27=AA, 32=AF）からアルファベット表記を算出
 function getColumnLetter(colIndex) {
   let letter = '';
@@ -51,44 +72,15 @@ async function syncMonthToSpreadsheet(sheets, spreadsheetId, targetSheetTitle, y
 
   if (isNewSheet) {
     console.log(`  ➕ シート「${targetSheetTitle}」を新規作成します...`);
-    const addRes = await sheets.spreadsheets.batchUpdate({
-      spreadsheetId,
-      requestBody: {
-        requests: [
-          {
-            addSheet: {
-              properties: {
-                title: targetSheetTitle,
-                gridProperties: {
-                  rowCount: reqRows,
-                  columnCount: reqCols,
-                  frozenRowCount: 2,
-                  frozenColumnCount: 1,
-                },
-              },
-            },
-          },
-        ],
-      },
-    });
-    sheetId = addRes.data.replies[0].addSheet.properties.sheetId;
-  } else {
-    sheetId = targetSheet.properties.sheetId;
-    const currentCols = targetSheet.properties.gridProperties?.columnCount || 0;
-    const currentRows = targetSheet.properties.gridProperties?.rowCount || 0;
-
-    // 【重要・月替わり対応】30日月 ➔ 31日月 等で列数が不足・変動している場合は即座にグリッドサイズを自動拡張/調整
-    if (currentCols !== reqCols || currentRows !== reqRows) {
-      dimensionChanged = true;
-      console.log(`  📐 シート「${targetSheetTitle}」のサイズを自動調整中: ${currentCols}列 -> ${reqCols}列`);
-      await sheets.spreadsheets.batchUpdate({
+    const addRes = await withSheetRetry(
+      () => sheets.spreadsheets.batchUpdate({
         spreadsheetId,
         requestBody: {
           requests: [
             {
-              updateSheetProperties: {
+              addSheet: {
                 properties: {
-                  sheetId,
+                  title: targetSheetTitle,
                   gridProperties: {
                     rowCount: reqRows,
                     columnCount: reqCols,
@@ -96,16 +88,66 @@ async function syncMonthToSpreadsheet(sheets, spreadsheetId, targetSheetTitle, y
                     frozenColumnCount: 1,
                   },
                 },
-                fields: 'gridProperties(rowCount,columnCount,frozenRowCount,frozenColumnCount)',
               },
             },
           ],
         },
+      }),
+      `addSheet(${targetSheetTitle})`
+    );
+    const addedSheet = addRes.data.replies[0].addSheet;
+    sheetId = addedSheet.properties.sheetId;
+    metaSheets.push(addedSheet);
+    targetSheet = addedSheet;
+  } else {
+    sheetId = targetSheet.properties.sheetId;
+    const currentCols = targetSheet.properties.gridProperties?.columnCount || 0;
+    const currentRows = targetSheet.properties.gridProperties?.rowCount || 0;
+
+    // 【重要・月替わり対応】30日月 ➔ 31日月 等で列数が不足・変動している場合は、結合解除の上でグリッドサイズを自動調整
+    if (currentCols !== reqCols || currentRows !== reqRows) {
+      dimensionChanged = true;
+      console.log(`  📐 シート「${targetSheetTitle}」のサイズを自動調整中: ${currentCols}列 -> ${reqCols}列`);
+      const resizeRequests = [];
+      if (currentCols > 1 && currentRows > 2) {
+        resizeRequests.push({
+          unmergeCells: {
+            range: {
+              sheetId,
+              startRowIndex: 2,
+              endRowIndex: currentRows,
+              startColumnIndex: 1,
+              endColumnIndex: currentCols,
+            },
+          },
+        });
+      }
+      resizeRequests.push({
+        updateSheetProperties: {
+          properties: {
+            sheetId,
+            gridProperties: {
+              rowCount: reqRows,
+              columnCount: reqCols,
+              frozenRowCount: 2,
+              frozenColumnCount: 1,
+            },
+          },
+          fields: 'gridProperties(rowCount,columnCount,frozenRowCount,frozenColumnCount)',
+        },
       });
+      await withSheetRetry(
+        () => sheets.spreadsheets.batchUpdate({
+          spreadsheetId,
+          requestBody: { requests: resizeRequests },
+        }),
+        `resizeSheet(${targetSheetTitle})`
+      );
       if (targetSheet.properties.gridProperties) {
         targetSheet.properties.gridProperties.columnCount = reqCols;
         targetSheet.properties.gridProperties.rowCount = reqRows;
       }
+      targetSheet.merges = (targetSheet.merges || []).filter(m => m.startRowIndex < 2 && m.startColumnIndex < 1);
     }
   }
 
@@ -119,11 +161,14 @@ async function syncMonthToSpreadsheet(sheets, spreadsheetId, targetSheetTitle, y
   if (readTargetSheet) {
     try {
       const endColLetter = getColumnLetter(daysInMonth + 1);
-      const pastRes = await sheets.spreadsheets.get({
-        spreadsheetId,
-        ranges: [`${readSheetTitle}!B1:${endColLetter}24`],
-        includeGridData: true,
-      });
+      const pastRes = await withSheetRetry(
+        () => sheets.spreadsheets.get({
+          spreadsheetId,
+          ranges: [`${readSheetTitle}!B1:${endColLetter}24`],
+          includeGridData: true,
+        }),
+        `getGridData(${readSheetTitle})`
+      );
       if (pastRes.data.sheets && pastRes.data.sheets[0]) {
         const allRows = pastRes.data.sheets[0].data?.[0]?.rowData || [];
         const expectedFirstDayName = DAY_NAMES[new Date(year, month - 1, 1).getDay()];
@@ -379,10 +424,20 @@ async function syncMonthToSpreadsheet(sheets, spreadsheetId, targetSheetTitle, y
     dataRows.push({ values: rowCells });
   }
 
-  // 同一列内で重複・交差する結合リクエストがあれば安全に除外（APIの mergeCells 競合エラーを100%防止）
+  // 同一列内で重複・交差する結合リクエスト、または範囲外の結合リクエストを安全に除外（APIの mergeCells 競合エラーを100%防止）
   const safeMergeRequests = [];
   for (const req of mergeRequests) {
     const r = req.mergeCells.range;
+    if (
+      r.startRowIndex < 2 ||
+      r.endRowIndex > reqRows ||
+      r.endRowIndex <= r.startRowIndex + 1 ||
+      r.startColumnIndex < 1 ||
+      r.endColumnIndex > reqCols ||
+      r.endColumnIndex !== r.startColumnIndex + 1
+    ) {
+      continue;
+    }
     const hasOverlap = safeMergeRequests.some(existing => {
       const er = existing.mergeCells.range;
       return (
@@ -396,6 +451,18 @@ async function syncMonthToSpreadsheet(sheets, spreadsheetId, targetSheetTitle, y
     }
   }
 
+  // 書き込み対象シートに既存の結合がある場合、2行目（ヘッダー）と3行目（データ）を跨ぐ不正な手動結合があってもエラーにならないよう結合解除範囲を自動拡張
+  let unmergeStartRow = 2;
+  let unmergeStartCol = 1;
+  const targetExistingMerges = targetSheet?.merges || [];
+  for (const m of targetExistingMerges) {
+    // A1:A2 (col 0..1, row 0..2) の正規ヘッダー結合は維持し、データ領域と交差する結合のみ対象
+    if (m.endRowIndex > 2 && m.endColumnIndex > 1) {
+      if (m.startRowIndex < unmergeStartRow) unmergeStartRow = m.startRowIndex;
+      if (m.startColumnIndex < unmergeStartCol) unmergeStartCol = m.startColumnIndex;
+    }
+  }
+
   // batchUpdate リクエストの組み立て（既存シート時は枠線・列幅等の再描画を省略して高速化）
   const updateRequests = [
     // 1. データ領域の結合を一旦全解除
@@ -403,9 +470,9 @@ async function syncMonthToSpreadsheet(sheets, spreadsheetId, targetSheetTitle, y
       unmergeCells: {
         range: {
           sheetId,
-          startRowIndex: 2,
+          startRowIndex: unmergeStartRow,
           endRowIndex: reqRows,
-          startColumnIndex: 1,
+          startColumnIndex: unmergeStartCol,
           endColumnIndex: reqCols,
         },
       },
@@ -476,10 +543,13 @@ async function syncMonthToSpreadsheet(sheets, spreadsheetId, targetSheetTitle, y
     );
   }
 
-  await sheets.spreadsheets.batchUpdate({
-    spreadsheetId,
-    requestBody: { requests: updateRequests },
-  });
+  await withSheetRetry(
+    () => sheets.spreadsheets.batchUpdate({
+      spreadsheetId,
+      requestBody: { requests: updateRequests },
+    }),
+    `batchUpdate(${targetSheetTitle})`
+  );
 
   console.log(`  ✅ シート「${targetSheetTitle}」の同期完了！`);
 }
@@ -500,7 +570,10 @@ async function syncAllMonthsToSpreadsheet(daysDataMap, spreadsheetId, keyFilePat
   });
   const sheets = google.sheets({ version: 'v4', auth });
 
-  const metaRes = await sheets.spreadsheets.get({ spreadsheetId });
+  const metaRes = await withSheetRetry(
+    () => sheets.spreadsheets.get({ spreadsheetId }),
+    'spreadsheets.get(meta)'
+  );
   const metaSheets = metaRes.data.sheets;
 
   // 日本時間（JST）基準で現在日時を取得

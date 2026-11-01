@@ -7,7 +7,7 @@ const { chromium } = require('playwright');
 // 現在選択されている日付の稼働枠およびレッスン情報を抽出
 async function extractCurrentDateReservations(page) {
   return await page.evaluate(() => {
-    const now = new Date();
+    const now = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Tokyo' }));
     const currentYear = now.getFullYear();
     const currentMonth = now.getMonth() + 1; // 1-12
 
@@ -212,75 +212,101 @@ async function processMonth(page, isCurrentMonth, todayDate) {
 }
 
 /**
- * VOATマイページから指定月数分のデータをスクレイピングする
+ * VOATマイページから指定月数分のデータをスクレイピングする（一時的な通信エラー時の自動リトライ・不完全データ防止機能付き）
  * @param {string} loginId ログインID
  * @param {string} password パスワード
  * @param {number} monthsToProcess 処理月数（デフォルト3）
  * @returns {Promise<Array>} 取得データ配列
  */
 async function scrapeVoatReservations(loginId, password, monthsToProcess = 3) {
-  console.log('ブラウザを起動しています...');
-  const browser = await chromium.launch({ headless: true });
-  const context = await browser.newContext();
-  const page = await context.newPage();
+  const MAX_SCRAPE_ATTEMPTS = 2;
 
-  try {
-    console.log('ログインページにアクセスしています...');
-    await page.goto('https://www.voat.co.jp/instmypage/login.html', { waitUntil: 'networkidle' });
+  for (let attempt = 1; attempt <= MAX_SCRAPE_ATTEMPTS; attempt++) {
+    console.log(`ブラウザを起動しています... (試行 ${attempt}/${MAX_SCRAPE_ATTEMPTS})`);
+    const browser = await chromium.launch({ headless: true });
+    const context = await browser.newContext({ timezoneId: 'Asia/Tokyo' });
+    const page = await context.newPage();
 
-    console.log('ログイン情報を入力しています...');
-    await page.fill('input[type="text"]', loginId);
-    await page.fill('input[type="password"]', password);
-    await page.click('input[value="ログイン"]');
-
-    console.log('ログイン完了を待機しています...');
     try {
-      await page.waitForURL('**/instmypage/', { timeout: 15000 });
-      console.log('ログインに成功しました。');
-    } catch (urlErr) {
-      await page.screenshot({ path: 'login_error.png' }).catch(() => {});
-      throw new Error('マイページに遷移できませんでした。IDまたはパスワードが誤っている可能性があります。');
-    }
-    await page.waitForTimeout(1000);
+      console.log('ログインページにアクセスしています...');
+      await page.goto('https://www.voat.co.jp/instmypage/login.html', { waitUntil: 'networkidle', timeout: 30000 });
 
-    console.log('レッスン情報ページに移動しています...');
-    await page.goto('https://www.voat.co.jp/instmypage/lesson.html', { waitUntil: 'networkidle' });
-    await page.waitForLoadState('networkidle');
-    await page.waitForTimeout(1500);
+      console.log('ログイン情報を入力しています...');
+      await page.fill('input[type="text"]', loginId);
+      await page.fill('input[type="password"]', password);
+      await page.click('input[value="ログイン"]');
 
-    const allDaysData = [];
-    const now = new Date();
-    const todayDate = now.getDate();
+      console.log('ログイン完了を待機しています...');
+      try {
+        await page.waitForURL('**/instmypage/', { timeout: 20000 });
+        console.log('ログインに成功しました。');
+      } catch (urlErr) {
+        await page.screenshot({ path: 'login_error.png' }).catch(() => {});
+        throw new Error('マイページに遷移できませんでした。IDまたはパスワードが誤っているか、VOATサーバーが応答していません。');
+      }
+      await page.waitForTimeout(1000);
 
-    for (let m = 0; m < monthsToProcess; m++) {
-      if (m > 0) {
-        const prevMonthText = await page.evaluate(() => document.querySelector('.cur-month')?.textContent?.trim() || '');
-        await page.click('.flatpickr-next-month');
+      console.log('レッスン情報ページに移動しています...');
+      await page.goto('https://www.voat.co.jp/instmypage/lesson.html', { waitUntil: 'networkidle', timeout: 30000 });
+      await page.waitForLoadState('networkidle');
+      await page.waitForTimeout(1500);
 
-        await page.waitForFunction((oldMonth) => {
-          const currentMonth = document.querySelector('.cur-month')?.textContent?.trim() || '';
-          return currentMonth !== '' && currentMonth !== oldMonth;
-        }, prevMonthText, { timeout: 10000 }).catch(() => {});
+      const allDaysData = [];
+      const now = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Tokyo' }));
+      const todayDate = now.getDate();
 
-        await page.waitForTimeout(800);
+      for (let m = 0; m < monthsToProcess; m++) {
+        if (m > 0) {
+          const prevMonthText = await page.evaluate(() => document.querySelector('.cur-month')?.textContent?.trim() || '');
+          let monthChanged = false;
+          for (let navTry = 1; navTry <= 3; navTry++) {
+            await page.click('.flatpickr-next-month');
+            try {
+              await page.waitForFunction((oldMonth) => {
+                const currentMonth = document.querySelector('.cur-month')?.textContent?.trim() || '';
+                return currentMonth !== '' && currentMonth !== oldMonth;
+              }, prevMonthText, { timeout: 6000 });
+              monthChanged = true;
+              break;
+            } catch (_) {
+              console.warn(`  ⚠️ 翌月への切り替えリトライ (${navTry}/3)...`);
+              await page.waitForTimeout(500);
+            }
+          }
+          if (!monthChanged) {
+            throw new Error(`カレンダーの翌月切り替えに失敗しました (前月表示: ${prevMonthText})`);
+          }
+          await page.waitForTimeout(800);
+        }
+
+        const monthLabel = await page.evaluate(() => {
+          const month = document.querySelector('.cur-month')?.textContent?.trim() || '';
+          const year = document.querySelector('input.cur-year')?.value || '';
+          return `${year}年 ${month}`;
+        });
+
+        console.log(`\n📅 ${monthLabel} を処理中...`);
+        const isCurrentMonth = (m === 0);
+        const monthRes = await processMonth(page, isCurrentMonth, todayDate);
+        allDaysData.push(...monthRes);
       }
 
-      const monthLabel = await page.evaluate(() => {
-        const month = document.querySelector('.cur-month')?.textContent?.trim() || '';
-        const year = document.querySelector('input.cur-year')?.value || '';
-        return `${year}年 ${month}`;
-      });
+      if (allDaysData.length === 0) {
+        throw new Error('VOATマイページから日付データを1日分も取得できませんでした（メンテナンスまたは通信不良の可能性があります）。');
+      }
 
-      console.log(`\n📅 ${monthLabel} を処理中...`);
-      const isCurrentMonth = (m === 0);
-      const monthRes = await processMonth(page, isCurrentMonth, todayDate);
-      allDaysData.push(...monthRes);
+      return allDaysData;
+    } catch (err) {
+      if (attempt < MAX_SCRAPE_ATTEMPTS) {
+        console.warn(`⚠️ スクレイピング中に一時的なエラーが発生したため、5秒後に自動リトライします (${attempt}/${MAX_SCRAPE_ATTEMPTS}): ${err.message}`);
+        await new Promise(r => setTimeout(r, 5000));
+      } else {
+        throw err;
+      }
+    } finally {
+      console.log('ブラウザを終了しています...');
+      await browser.close().catch(() => {});
     }
-
-    return allDaysData;
-  } finally {
-    console.log('ブラウザを終了しています...');
-    await browser.close();
   }
 }
 

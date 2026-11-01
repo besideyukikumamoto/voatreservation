@@ -8,6 +8,27 @@ const { google } = require('googleapis');
 const VOAT_SYNC_MARKER = '[VOAT-SYNC]';
 
 /**
+ * Google API 一時的エラー（429 / 5xx / 通信瞬断）の自動リトライ補助関数
+ */
+async function withApiRetry(fn, label, maxRetries = 3) {
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      return await fn();
+    } catch (err) {
+      const code = err.code || err.status || 0;
+      const isRetryable = code === 429 || code === 500 || code === 502 || code === 503 || code === 504 ||
+        /ECONNRESET|ETIMEDOUT|ENOTFOUND|socket hang up|Rate Limit|Quota exceeded|Backend Error/i.test(err.message || '');
+      if (!isRetryable || attempt >= maxRetries) {
+        throw err;
+      }
+      const waitMs = 1500 * Math.pow(2, attempt - 1);
+      console.warn(`    ⚠️ Google Calendar API 一時エラー (${label}) - ${waitMs}ms 後にリトライします (${attempt}/${maxRetries}): ${err.message}`);
+      await new Promise(r => setTimeout(r, waitMs));
+    }
+  }
+}
+
+/**
  * レッスン予約リストをGoogleカレンダーに差分同期する
  * @param {Array} reservations 予約オブジェクト配列
  * @param {string} calendarId カレンダーID
@@ -27,9 +48,9 @@ async function syncReservationsToCalendar(reservations, calendarId, keyFilePath,
   });
   const calendar = google.calendar({ version: 'v3', auth });
 
-  // 【過去日保護】同期対象期間の開始日時を「当日 00:00:00」にする
+  // 【過去日保護】同期対象期間の開始日時を日本時間（JST）基準で「当日 00:00:00」にする
   // これにより、過去日スキップ時でも過去日のイベントが削除対象に入るのを100%防止
-  const now = new Date();
+  const now = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Tokyo' }));
   const startYear = now.getFullYear();
   const startMonth = now.getMonth(); // 0-indexed
   const startDate = now.getDate();
@@ -47,14 +68,17 @@ async function syncReservationsToCalendar(reservations, calendarId, keyFilePath,
   let existingEvents = [];
   let pageToken = undefined;
   do {
-    const res = await calendar.events.list({
-      calendarId,
-      timeMin: startStr,
-      timeMax: endStr,
-      singleEvents: true,
-      maxResults: 2500,
-      pageToken,
-    });
+    const res = await withApiRetry(
+      () => calendar.events.list({
+        calendarId,
+        timeMin: startStr,
+        timeMax: endStr,
+        singleEvents: true,
+        maxResults: 2500,
+        pageToken,
+      }),
+      'events.list'
+    );
     existingEvents.push(...(res.data.items || []));
     pageToken = res.data.nextPageToken;
   } while (pageToken);
@@ -110,6 +134,12 @@ async function syncReservationsToCalendar(reservations, calendarId, keyFilePath,
     }
   }
 
+  // 【フェイルセーフ保護】既存予定が5件以上あるのに新規取得予定が0件の場合は、サイト異常による全消去を防ぐため削除をスキップ
+  if (uniqueReservations.length === 0 && existingMap.size >= 5) {
+    console.warn(`  ⚠️ 既存の同期予定が ${existingMap.size} 件あるのに対し今回取得した予約が 0 件のため、安全保護により一括削除をスキップします。`);
+    return;
+  }
+
   for (const [key, ev] of existingMap.entries()) {
     toDeleteEvents.push(ev);
   }
@@ -119,7 +149,7 @@ async function syncReservationsToCalendar(reservations, calendarId, keyFilePath,
     console.log(`  不要・変更されたイベント ${toDeleteEvents.length} 件を削除中...`);
     for (const ev of toDeleteEvents) {
       try {
-        await calendar.events.delete({ calendarId, eventId: ev.id });
+        await withApiRetry(() => calendar.events.delete({ calendarId, eventId: ev.id }), 'events.delete');
         console.log(`    [削除] ${ev.start.dateTime || ev.start.date}: ${ev.summary}`);
       } catch (delErr) {
         if (delErr.code !== 410) {
@@ -147,7 +177,7 @@ async function syncReservationsToCalendar(reservations, calendarId, keyFilePath,
 
       try {
         console.log(`    [登録] ${startDateTime} : ${res.title}`);
-        await calendar.events.insert({ calendarId, requestBody: eventBody });
+        await withApiRetry(() => calendar.events.insert({ calendarId, requestBody: eventBody }), 'events.insert');
       } catch (apiErr) {
         console.error(`    [エラー] ${startDateTime}: ${apiErr.message}`);
       }
