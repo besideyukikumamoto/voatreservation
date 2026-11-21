@@ -114,18 +114,18 @@ function buildScheduleHtml({
 
   // 日数に応じて1列の幅・フォントサイズを動的に最適化（余白ゼロ＆文字潰れゼロ）
   let timeColW, dayColW, baseFontSize, grpFontSize, headerFontSize, rowHeight;
-  if (dayCount <= 8) {
+  if (dayCount <= 10) {
     timeColW = 92;
-    dayColW = 118;
+    dayColW = 112;
     baseFontSize = 16;
-    grpFontSize = 14;
+    grpFontSize = 13;
     headerFontSize = 18;
     rowHeight = 40;
   } else if (dayCount <= 15) {
     timeColW = 86;
-    dayColW = 86;
+    dayColW = 94;
     baseFontSize = 14;
-    grpFontSize = 12;
+    grpFontSize = 11;
     headerFontSize = 16;
     rowHeight = 38;
   } else if (dayCount <= 22) {
