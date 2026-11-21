@@ -571,6 +571,29 @@ async function syncAllMonthsToSpreadsheet(daysDataMap, spreadsheetId, keyFilePat
     }
   }
 
+  // 他講師の旧スクレイパーが月替わりで自動作成・再表示した旧シート名（スペースなし YYYY年M月）を自動で非表示化
+  const visibleLegacySheets = metaSheets.filter(
+    s => /^\d{4}年\d{1,2}月$/.test(s.properties.title) && !s.properties.hidden
+  );
+  if (visibleLegacySheets.length > 0) {
+    const hideRequests = visibleLegacySheets.map(s => ({
+      updateSheetProperties: {
+        properties: { sheetId: s.properties.sheetId, hidden: true },
+        fields: 'hidden',
+      },
+    }));
+    await withSheetRetry(
+      () => sheets.spreadsheets.batchUpdate({
+        spreadsheetId,
+        requestBody: { requests: hideRequests },
+      }),
+      'hideLegacySheets'
+    );
+    console.log(
+      `🙈 旧仕様のダミーシートを自動非表示化しました: ${visibleLegacySheets.map(s => s.properties.title).join(', ')}`
+    );
+  }
+
   console.log('Googleスプレッドシートへの直接マトリックス同期がすべて完了しました！');
 }
 
