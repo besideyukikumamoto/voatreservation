@@ -1,0 +1,63 @@
+name: VOAT LINE High-Res Schedule Image Updater
+
+on:
+  schedule:
+    # 毎週日曜 11:30 JST (02:30 UTC): 日曜12:00事前フライトチェック向けに翌月曜分の高画質画像を事前生成
+    - cron: '30 2 * * 0'
+    # 毎週月曜 11:10 JST (02:10 UTC): 月曜12:00本番配信の50分前に当日最新予約で超高精細画像を生成・更新
+    - cron: '10 2 * * 1'
+  workflow_dispatch:
+    inputs:
+      next_day:
+        description: '翌日基準で生成するか (日曜テスト時は true)'
+        required: false
+        default: 'false'
+
+concurrency:
+  group: line-schedule-image
+  cancel-in-progress: true
+
+jobs:
+  update-schedule-image:
+    # 隈元先生専用リポジトリでのみ実行（他講師リポジトリへ誤配信されても完全に抑止）
+    if: github.repository == 'besideyukikumamoto/voatreservation'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install Japanese fonts for crisp rendering
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq fonts-noto-cjk
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Install Playwright Chromium
+        run: npx playwright install chromium --with-deps
+
+      - name: Create service-account.json
+        run: echo '${{ secrets.GOOGLE_APPLICATION_CREDENTIALS_JSON }}' > service-account.json
+
+      - name: Generate and Upload High-Res Schedule Image
+        run: |
+          DOW=$(TZ=Asia/Tokyo date +%u)
+          if [ "$DOW" = "7" ] || [ "${{ github.event.inputs.next_day }}" = "true" ]; then
+            echo "📅 日曜または翌日指定のため、翌月曜配信用の高精細画像を生成します..."
+            node src/generateScheduleImage.js --next-day
+          else
+            echo "📅 当日配信用の最新高精細画像を生成します..."
+            node src/generateScheduleImage.js
+          fi
+        env:
+          TZ: Asia/Tokyo
+          GOOGLE_APPLICATION_CREDENTIALS: ./service-account.json
+          SPREADSHEET_ID: ${{ secrets.SPREADSHEET_ID }}
